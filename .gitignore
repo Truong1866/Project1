@@ -1,0 +1,5 @@
+.idea
+.venv
+config.local.yaml
+pyproject.toml
+uv.lock
