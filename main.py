@@ -1,14 +1,16 @@
-import openvino as ov
-from ultralytics import YOLO
+from BusinessLayer.pipeline import SmartVisionPipeline
 
-core = ov.Core()
-devices = core.available_devices
+if __name__ == '__main__':
+    # 1. Cấu hình đường dẫn model (từ bước setup)
+    YOLO_PATH = "Models/yolov8n.pt"
+    FACE_DIR = "Models/face_models/"
+    CAMERA_SOURCES = [0]
 
-print("=== THÔNG TIN PHẦN CỨNG HỖ TRỢ AI ===")
-for device in devices:
-    name = core.get_property(device, "FULL_DEVICE_NAME")
-    print(f"- Thiết bị khả dụng: {device} ({name})")
+    # Khởi tạo và chạy
+    pipeline = SmartVisionPipeline(
+        yolo_path=YOLO_PATH,
+        face_dir=FACE_DIR,
+        camera_sources=CAMERA_SOURCES
+    )
 
-print("\n=== THÔNG TIN YOLO ===")
-model = YOLO('Model/yolov8n.pt')
-print("Khởi tạo YOLOv8 thành công!")
+    pipeline.run()
