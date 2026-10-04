@@ -77,7 +77,7 @@ def run_native_openvino(model_path):
         if not ret:
             break
 
-        # Đo: tiền xử lý (LetterBox) + inference + hậu xử lý (NMS, scale_boxes)
+        # Đo: tiền xử lý (LetterBox) + Inference + hậu xử lý (NMS, scale_boxes)
         # -> tương đương phần model.predict() của Ultralytics (không tính phần vẽ)
         start_time = time.perf_counter()
         det = yolo(frame)

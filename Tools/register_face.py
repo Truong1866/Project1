@@ -1,6 +1,6 @@
 from pathlib import Path
 import cv2
-from BusinessLayer.inference.inference_engine import InferenceEngine
+from BusinessLayer.Inference.inference_engine import InferenceEngine
 from DataLayer.vector_db import FaceDatabase
 
 
