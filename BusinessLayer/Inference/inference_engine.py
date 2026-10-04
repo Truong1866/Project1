@@ -1,120 +1,102 @@
-import openvino as ov
-from ultralytics import YOLO
-from insightface.app import FaceAnalysis
-import cv2
+"""Đóng gói toàn bộ quy trình AI thành các hàm đơn giản cho pipeline:
+
+    detect_persons(frame)            -> [{'box': [x1,y1,x2,y2], 'confidence': float}]
+    process_faces(frame, person_box) -> [{'embedding', 'abs_box', 'det_score'}]
+    largest_face(frame)              -> dùng khi đăng ký người quen
+
+YOLO chạy bằng OpenVINO native (yolo_native.py) -> dùng được iGPU Intel, không cần torch/CUDA.
+Một khoá chung bảo vệ các lệnh suy luận (pipeline + giao diện đăng ký có thể gọi đồng thời).
+"""
+from __future__ import annotations
+
+import threading
+from pathlib import Path
+
+try:  # nạp OpenVINO TRƯỚC cv2/onnxruntime để tránh xung đột DLL trên một số máy
+    import openvino as ov  # noqa: F401
+except ImportError:  # pragma: no cover
+    ov = None
+
 import numpy as np
+
+from BusinessLayer.Inference.face_recognizer import FaceRecognizer
+from BusinessLayer.Inference.yolo_native import YOLOv8OpenVINO
+from Utils.logger import get_logger
+
+log = get_logger("Engine")
 
 
 class InferenceEngine:
-    def __init__(self, yolo_model_path, face_model_dir):
-        """
-        Khởi tạo các mô hình và đẩy lên thiết bị phần cứng tối ưu.
-        """
-        print("Đang khởi tạo Inference Engine...")
-        self.core = ov.Core()
+    def __init__(self, yolo_model_path, face_model_dir, device: str = "GPU", imgsz: int = 640,
+                 person_conf: float = 0.30, person_iou: float = 0.45,
+                 face_det_size=(320, 320), face_det_thresh: float = 0.5,
+                 head_ratio: float = 0.6, min_face_px: int = 36):
+        log.info("Đang khởi tạo Inference Engine...")
+        self._lock = threading.Lock()
+        yolo_path = Path(yolo_model_path)
+        if yolo_path.suffix == ".pt":
+            raise RuntimeError(
+                f"'{yolo_path}' là file PyTorch. Hãy chạy Tools/setup_models.py để export sang OpenVINO "
+                "rồi trỏ models.yolo_path tới thư mục *_openvino_model.")
 
-        # 1. Tìm thiết bị GPU (Intel Iris Xe)
-        # Nếu không tìm thấy GPU, hệ thống sẽ tự động rơi về (fallback) CPU.
-        self.device = 'GPU' if 'GPU' in self.core.available_devices else 'CPU'
-        print(f"-> Thiết bị Inference mặc định: {self.device}")
-
-        # 2. Khởi tạo YOLOv8 bằng OpenVINO
+        self.device = device
         try:
-            print(f"-> Nạp mô hình YOLOv8 từ: {yolo_model_path} lên {self.device}...")
-            # Ultralytics tự động xử lý giao tiếp OpenVINO qua định dạng thư mục
-            self.yolo_model = YOLO(yolo_model_path, task='detect')
+            self.yolo = self._make_yolo(yolo_path, device, imgsz, person_conf, person_iou)
         except Exception as e:
-            raise RuntimeError(f"Lỗi nạp YOLO: {e}")
+            if device.upper() == "CPU":
+                raise
+            log.warning("YOLO không chạy được trên %s (%s) -> chuyển sang CPU", device, e)
+            self.device = "CPU"
+            self.yolo = self._make_yolo(yolo_path, "CPU", imgsz, person_conf, person_iou)
+        log.info("YOLO sẵn sàng trên %s", self.device)
 
-        # 3. Khởi tạo InsightFace (Phát hiện mặt & Trích xuất vector)
+        self.faces = FaceRecognizer(face_model_dir, det_size=face_det_size, det_thresh=face_det_thresh,
+                                    head_ratio=head_ratio, min_face_px=min_face_px)
+        self._warmup()
+        log.info("=> Inference Engine sẵn sàng!")
+
+    @staticmethod
+    def _make_yolo(path: Path, device, imgsz, conf, iou):
+        return YOLOv8OpenVINO(path, device=device, imgsz=imgsz, conf=conf, iou=iou, classes=[0],
+                              cache_dir=str(path.parent / ".ov_cache"), performance_hint="LATENCY")
+
+    def _warmup(self) -> None:
+        """Chạy thử 1 khung đen: biên dịch kernel GPU trước, khung thật đầu tiên không bị khựng."""
         try:
-            print(f"-> Nạp mô hình Khuôn mặt từ: {face_model_dir}...")
-            # providers: Dùng OpenVINOExecutionProvider để chạy ONNX bằng Intel Iris Xe
-            # Nếu máy không có OpenVINO provider cài sẵn, nó sẽ dùng CPUExecutionProvider
-            providers = ['OpenVINOExecutionProvider', 'CPUExecutionProvider']
+            self.yolo(np.zeros((480, 640, 3), dtype=np.uint8))
+        except Exception:
+            log.exception("Warm-up YOLO lỗi")
 
-            self.face_app = FaceAnalysis(name='buffalo_s',
-                                         root=face_model_dir,
-                                         providers=providers)
+    # ------------------------------------------------------------------ API
+    def set_person_conf(self, conf: float) -> None:
+        self.yolo.conf = float(conf)
 
-            # Cấu hình ngưỡng det_thresh để phát hiện khuôn mặt (từ 0 đến 1)
-            self.face_app.prepare(ctx_id=0, det_size=(640, 640), det_thresh=0.5)
-        except Exception as e:
-            raise RuntimeError(f"Lỗi nạp InsightFace: {e}")
-
-        print("=> Inference Engine sẵn sàng!")
-
-    def detect_persons(self, frame):
-        """
-        Nhận đầu vào là 1 khung hình (numpy array), trả về danh sách các bounding box của 'người'.
-        """
-        # Ép YOLOv8 sử dụng CPU thay vì tự động tìm card NVIDIA
-        results = self.yolo_model.predict(
-            source=frame,
-            classes=[0],  # 0 là ID của nhãn 'person' trong COCO
-            device='cpu',  # BẮT BUỘC SỬA THÀNH 'cpu'
-            verbose=False
-        )
-
-        # Kết quả là một list, do ta truyền 1 ảnh nên lấy phần tử đầu tiên
-        result = results[0]
-        boxes = result.boxes.xyxy.cpu().numpy()  # Tọa độ [x1, y1, x2, y2]
-        confidences = result.boxes.conf.cpu().numpy()  # Độ tin cậy
-
+    def detect_persons(self, frame: np.ndarray) -> list[dict]:
+        with self._lock:
+            det = self.yolo(frame)
         persons = []
-        for box, conf in zip(boxes, confidences):
-            x1, y1, x2, y2 = map(int, box)
-            persons.append({
-                "box": [x1, y1, x2, y2],
-                "confidence": float(conf)
-            })
-
+        for box, conf in zip(det.boxes, det.conf):
+            x1, y1, x2, y2 = (int(v) for v in box)
+            if x2 - x1 < 8 or y2 - y1 < 16:
+                continue
+            persons.append({"box": [x1, y1, x2, y2], "confidence": float(conf)})
         return persons
 
-    def process_faces(self, frame, person_box):
-        """
-        Cắt (crop) vùng có người và nhận diện khuôn mặt trong vùng đó.
-        Trả về danh sách các vector đặc trưng khuôn mặt (embeddings).
-        """
-        x1, y1, x2, y2 = person_box
+    def process_faces(self, frame: np.ndarray, person_box) -> list[dict]:
+        with self._lock:
+            return self.faces.extract(frame, person_box, head_only=True)
 
-        # Cắt lấy vùng ảnh chỉ chứa 1 người
-        # Cần đảm bảo tọa độ không vượt quá kích thước ảnh
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
-        person_crop = frame[y1:y2, x1:x2]
-
-        # Bỏ qua nếu khung cắt quá nhỏ (rác/lỗi)
-        if person_crop.shape[0] < 50 or person_crop.shape[1] < 50:
-            return []
-
-        # Cho InsightFace tìm mặt và trích xuất vector TRONG khung ảnh người đã cắt
-        faces = self.face_app.get(person_crop)
-
-        face_data = []
-        for face in faces:
-            # face.embedding là vector 512 chiều đại diện cho khuôn mặt
-            face_data.append({
-                "embedding": face.embedding,
-                # Tọa độ mặt này là tọa độ tương đối trong khung person_crop
-                # Cần cộng thêm x1, y1 để ra tọa độ tuyệt đối trên ảnh gốc
-                "abs_box": [
-                    int(face.bbox[0] + x1), int(face.bbox[1] + y1),
-                    int(face.bbox[2] + x1), int(face.bbox[3] + y1)
-                ]
-            })
-
-        return face_data
-
-
-if __name__ == '__main__':
-    # Đường dẫn dựa theo kết quả chạy setup_models.py của bạn
-    YOLO_DIR = "../../Models/yolov8n_openvino_model/"
-    FACE_DIR = "../../Models/face_models/"
-
-    try:
-        engine = InferenceEngine(YOLO_DIR, FACE_DIR)
-        print("\nĐã nạp thành công mô hình lên", engine.device)
-    except Exception as e:
-        print("Có lỗi xảy ra:", e)
+    def largest_face(self, frame: np.ndarray) -> dict | None:
+        """Mặt lớn nhất trong khung: thử qua box người trước, không có thì quét cả khung."""
+        candidates: list[dict] = []
+        for p in sorted(self.detect_persons(frame),
+                        key=lambda p: -(p["box"][2] - p["box"][0]) * (p["box"][3] - p["box"][1])):
+            candidates = self.process_faces(frame, p["box"])
+            if candidates:
+                break
+        if not candidates:
+            with self._lock:
+                candidates = self.faces.extract(frame, None)
+        if not candidates:
+            return None
+        return max(candidates, key=lambda f: (f["abs_box"][2] - f["abs_box"][0]) * (f["abs_box"][3] - f["abs_box"][1]))
