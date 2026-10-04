@@ -22,11 +22,18 @@ def startup_event():
 def shutdown_event():
     pipeline.stop()
 
+
 @app.get("/", response_class=HTMLResponse)
 def index(request: Request):
     # Trả về trang Web và danh sách tên các camera
     cam_ids = [cam.camera_id for cam in pipeline.cameras]
-    return templates.TemplateResponse("index.html", {"request": request, "cameras": cam_ids})
+
+    # Chỉ định rõ ràng request, name và context cho phiên bản FastAPI mới
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"cameras": cam_ids}
+    )
 
 def generate_video_stream(camera_id: str):
     """Hàm Generator liên tục phát ảnh JPEG cho trình duyệt (MJPEG)."""
