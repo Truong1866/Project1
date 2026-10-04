@@ -1,0 +1,69 @@
+# ===================== CẤU HÌNH CHUNG =====================
+# Mọi giá trị có thể bị ghi đè bởi config.local.yaml (không đẩy lên Git).
+
+app:
+  title: "Smart Vision"
+  log_level: INFO
+
+models:
+  yolo_path: Models/yolov8n_openvino_model   # thư mục chứa .xml/.bin (hoặc file .xml / .onnx)
+  face_dir: Models/face_models               # root của insightface (chứa models/buffalo_s)
+  device: GPU                                # GPU | CPU | AUTO  (GPU lỗi sẽ tự rơi về CPU)
+  imgsz: 640                                 # chỉ dùng khi model có shape động
+
+# ---------- Luồng AI ----------
+detection:
+  person_conf: 0.30        # ngưỡng thấp để ByteTrack còn dùng box điểm thấp
+  person_iou: 0.45
+  ai_fps: 10               # số lần chạy AI/giây cho mỗi nguồn khi đang có chuyển động
+  idle_ai_fps: 2           # khi người đứng yên (đã thấy người nhưng không còn chuyển động)
+  no_person_timeout: 1.5   # giây không thấy người -> đóng "cổng" AI, quay về chờ chuyển động
+  motion_hold: 1.0         # giữ trạng thái "đang chuyển động" thêm bao nhiêu giây
+
+# ---------- Phát hiện chuyển động có lọc ----------
+motion:
+  fps: 15                  # tần suất phân tích chuyển động / nguồn
+  width: 320               # thu nhỏ khung hình về bề rộng này trước khi phân tích
+  confirm_frames: 3        # số lần liên tiếp có chuyển động hợp lệ mới mở cổng AI
+  min_area_ratio: 0.003    # vùng chuyển động tối thiểu (tỉ lệ diện tích khung hình)
+  min_solidity: 0.30       # độ "đặc" của vùng; cây/lá rung thường rất thưa
+  max_aspect: 4.0          # tỉ lệ rộng/cao tối đa (bóng đổ kéo dài thường quá dẹt)
+  global_change_ratio: 0.45  # >45% khung hình đổi -> đổi sáng/rung máy, bỏ qua
+  var_threshold: 32
+  history: 300
+  warmup_frames: 20
+  clutter_limit: 0.6       # vùng trùng >=60% "bản đồ nhiễu đã học" bị loại
+  clutter_gain: 0.5        # mỗi lần báo động giả cộng bao nhiêu vào bản đồ nhiễu
+  clutter_decay: 0.9995    # độ phai của bản đồ nhiễu khi vùng đó yên tĩnh
+
+# ---------- ByteTrack ----------
+tracker:
+  high_thresh: 0.50
+  low_thresh: 0.10
+  new_track_thresh: 0.50
+  match_thresh: 0.80
+  track_buffer: 30
+
+# ---------- Khuôn mặt ----------
+face:
+  threshold: 0.45          # cosine similarity tối thiểu để coi là người quen
+  det_size: [320, 320]
+  det_thresh: 0.50
+  head_ratio: 0.60         # chỉ tìm mặt ở 60% phía trên khung người
+  min_face_px: 36
+  confirm_known: 2         # số lần nhận diện trùng khớp để chốt người quen
+  confirm_unknown: 3       # số lần "không khớp" để chốt người lạ
+  interval_pending: 0.30   # giây giữa 2 lần thử nhận diện khi chưa có kết luận
+  interval_unknown: 1.50   # giây giữa 2 lần kiểm tra lại người đã bị gắn "lạ"
+  max_per_run: 2           # tối đa số mặt xử lý trong 1 lượt AI
+
+# ---------- Sự kiện ----------
+events:
+  cooldown_sec: 10         # cùng (nguồn, loại, tên) không báo lại trong N giây
+  save_snapshot: true
+  snapshot_dir: Data/snapshots
+  db_path: DataLayer/events.db
+
+ui:
+  refresh_ms: 16
+  tiles_per_page: 4
