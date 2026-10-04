@@ -13,7 +13,7 @@ def setup_yolo():
 
     print("-> Đang chạy thử nghiệm (Inference Test) để kiểm tra lỗi...")
     try:
-        # Dùng một bức ảnh mẫu mặc định của thư viện để test
+        # Dùng một bức ảnh mẫu mặc định của thư viện để benchmark
         results = model.predict(source="https://ultralytics.com/images/bus.jpg", imgsz=640, verbose=False)
         print("=> [Thành công] Mô hình YOLOv8n gốc hoạt động bình thường!")
     except Exception as e:

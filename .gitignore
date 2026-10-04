@@ -5,3 +5,12 @@ pyproject.toml
 uv.lock
 Models
 project_struct.txt
+Tools/benchmark/result
+Tools/benchmark/yolov8n_ov_fp16_320_openvino_model
+Tools/benchmark/yolov8n_ov_fp16_640_openvino_model
+Tools/benchmark/yolov8n_ov_fp32_320_openvino_model
+Tools/benchmark/yolov8n_ov_fp32_640_openvino_model
+Tools/benchmark/yolov8n.pt
+Tools/benchmark/coco128.yaml
+Tools/benchmark/input.mp4
+DataLayer/known_faces.pkl
