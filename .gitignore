@@ -4,4 +4,4 @@ config.local.yaml
 pyproject.toml
 uv.lock
 Models
-Tools/bus.jpg
+project_struct.txt
