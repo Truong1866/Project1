@@ -137,7 +137,8 @@ class SmartVisionPipeline:
             device=c.get("models.device", "GPU"), imgsz=int(c.get("models.imgsz", 640)),
             person_conf=self.person_conf, person_iou=float(c.get("detection.person_iou", 0.45)),
             face_det_size=tuple(fc.get("det_size", (320, 320))), face_det_thresh=float(fc.get("det_thresh", 0.5)),
-            head_ratio=float(fc.get("head_ratio", 0.6)), min_face_px=int(fc.get("min_face_px", 36)))
+            head_ratio=float(fc.get("head_ratio", 0.6)), min_face_px=int(fc.get("min_face_px", 36)),
+            face_device_type=str(fc.get("device_type", "GPU_FP16")))
 
     def start(self) -> None:
         if self._running:
@@ -298,7 +299,7 @@ class SmartVisionPipeline:
     def _ai_loop(self) -> None:
         try:
             self.engine = self._engine_factory()
-            self.ai_device = getattr(self.engine, "device", "-")
+            self.ai_device = f"YOLO {getattr(self.engine, 'device', '-')} | Mặt {getattr(self.engine, 'face_device', '-')}"
             self.ai_status = f"AI sẵn sàng ({self.ai_device})"
             self.ai_ready.set()
         except Exception as e:

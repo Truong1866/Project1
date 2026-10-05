@@ -46,6 +46,7 @@ tracker:
 
 # ---------- Khuôn mặt ----------
 face:
+  device_type: GPU_FP16    # GPU_FP16 | GPU_FP32 | CPU_FP32 ... (OpenVINO EP của InsightFace)
   threshold: 0.45          # cosine similarity tối thiểu để coi là người quen
   det_size: [320, 320]
   det_thresh: 0.50
@@ -64,6 +65,14 @@ events:
   snapshot_dir: Data/snapshots
   db_path: DataLayer/events.db
 
+# ---------- Giao diện --------
 ui:
   refresh_ms: 16
   tiles_per_page: 4
+
+# ---------- Discord ----------
+# ---------- Discord ----------
+discord:
+  enabled: true
+  min_interval_sec: 20     # khoảng cách tối thiểu giữa 2 tin nhắn
+  web_hooks: []            # khai báo thật trong config.local.yaml

@@ -5,7 +5,7 @@
 """
 import argparse
 import sys
-
+from BusinessLayer.discord_notifier import DiscordNotifier
 try:  # nạp OpenVINO TRƯỚC cv2 / onnxruntime (tránh xung đột DLL trên một số máy Windows)
     import openvino  # noqa: F401
 except ImportError:
@@ -35,12 +35,18 @@ def main() -> int:
     repo = EventRepository(SQLiteDB(cfg.path("events.db_path", "DataLayer/events.db")))
     bus = EventBus()
     pipeline = SmartVisionPipeline(cfg, db=db, bus=bus, event_repo=repo)
+    notifier = DiscordNotifier.from_config(cfg, bus)  # None nếu chưa cấu hình webhook
 
     app = QApplication(sys.argv)
     window = MainWindow(cfg, pipeline, bus, db, initial_sources=args.sources)
     window.show()
-    pipeline.start()  # nạp mô hình ở luồng ngầm, giao diện hiện ngay không bị đơ
-    return app.exec()
+    pipeline.start()
+    code = app.exec()
+    if notifier:
+        notifier.stop()
+    return code
+    # nạp mô hình ở luồng ngầm, giao diện hiện ngay không bị đơ
+    return code
 
 
 if __name__ == "__main__":

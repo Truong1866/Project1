@@ -4,7 +4,7 @@
     process_faces(frame, person_box) -> [{'embedding', 'abs_box', 'det_score'}]
     largest_face(frame)              -> dùng khi đăng ký người quen
 
-YOLO chạy bằng OpenVINO native (yolo_native.py) -> dùng được iGPU Intel, không cần torch/CUDA.
+YOLO chạy bằng OpenVINO native (yolo_native.py); khuôn mặt chạy InsightFace + OpenVINO EP (GPU_FP16).
 Một khoá chung bảo vệ các lệnh suy luận (pipeline + giao diện đăng ký có thể gọi đồng thời).
 """
 from __future__ import annotations
@@ -19,7 +19,7 @@ except ImportError:  # pragma: no cover
 
 import numpy as np
 
-from BusinessLayer.Inference.face_recognizer import FaceRecognizer
+from BusinessLayer.Inference.face_recognizer import DEFAULT_DEVICE_TYPE, FaceRecognizer
 from BusinessLayer.Inference.yolo_native import YOLOv8OpenVINO
 from Utils.logger import get_logger
 
@@ -30,7 +30,8 @@ class InferenceEngine:
     def __init__(self, yolo_model_path, face_model_dir, device: str = "GPU", imgsz: int = 640,
                  person_conf: float = 0.30, person_iou: float = 0.45,
                  face_det_size=(320, 320), face_det_thresh: float = 0.5,
-                 head_ratio: float = 0.6, min_face_px: int = 36):
+                 head_ratio: float = 0.6, min_face_px: int = 36,
+                 face_device_type: str = DEFAULT_DEVICE_TYPE):
         log.info("Đang khởi tạo Inference Engine...")
         self._lock = threading.Lock()
         yolo_path = Path(yolo_model_path)
@@ -51,7 +52,11 @@ class InferenceEngine:
         log.info("YOLO sẵn sàng trên %s", self.device)
 
         self.faces = FaceRecognizer(face_model_dir, det_size=face_det_size, det_thresh=face_det_thresh,
-                                    head_ratio=head_ratio, min_face_px=min_face_px)
+                                    head_ratio=head_ratio, min_face_px=min_face_px,
+                                    device_type=face_device_type)
+        self.face_device = self.faces.device_label
+        log.info("Khuôn mặt sẵn sàng trên %s", self.face_device)
+
         self._warmup()
         log.info("=> Inference Engine sẵn sàng!")
 
@@ -61,7 +66,7 @@ class InferenceEngine:
                               cache_dir=str(path.parent / ".ov_cache"), performance_hint="LATENCY")
 
     def _warmup(self) -> None:
-        """Chạy thử 1 khung đen: biên dịch kernel GPU trước, khung thật đầu tiên không bị khựng."""
+        """Chạy thử 1 khung đen: biên dịch kernel GPU của YOLO trước (InsightFace tự warm-up trong FaceRecognizer)."""
         try:
             self.yolo(np.zeros((480, 640, 3), dtype=np.uint8))
         except Exception:
