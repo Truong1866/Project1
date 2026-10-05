@@ -12,3 +12,4 @@ Tools/benchmark/input.mp4
 DataLayer/known_faces.pkl
 Tools/benchmark/yolov8n_ov_*
 Data
+logs
