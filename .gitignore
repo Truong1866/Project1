@@ -13,4 +13,5 @@ DataLayer/known_faces.pkl
 Tools/benchmark/yolov8n_ov_*
 Data
 logs
-test.jpg
+input.jpg
+DataLayer/events.db
