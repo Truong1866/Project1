@@ -1,7 +1,11 @@
 Hệ Thống Camera Giám Sát Thông Minh (Smart Camera Surveillance)
 
 ⚠️ Cảnh Báo Phần Cứng:
-Repository này được phát triển, thử nghiệm và tối ưu hóa dựa trên cấu hình máy tính cá nhân sử dụng iGPU Intel Iris Graphic Xe (Nếu bạn muốn chạy thử dự án với máy tính không có iGPU giống repo thì vui lòng xem openvino có hỗ trợ không cũng như xem xét và viết lại file [yolo_native.py](BusinessLayer/inference/yolo_native.py)). Việc chạy dự án trong các cấu hình có GPU hỗ trợ cuda sẽ có khả năng không hoạt động khi đó hãy xem các file [yolo_native.py](BusinessLayer/inference/yolo_native.py) và [face_recognizer.py](BusinessLayer/Inference/face_recognizer.py).
+Repository này được phát triển, thử nghiệm và tối ưu hóa dựa trên cấu hình máy tính cá nhân sử dụng iGPU Intel Iris Graphic Xe (không hỗ trợ cuda). Đối với các cấu hình:
++ Có iGPU không giống với repository.
++ GPU hỗ trợ cuda.
+
+Sẽ có khả năng không hoạt động khi đó hãy xem các file [yolo_native.py](BusinessLayer/inference/yolo_native.py) và [face_recognizer.py](BusinessLayer/Inference/face_recognizer.py) để chỉnh sửa cho hợp lý.
 
 📑 Mục Lục
 
