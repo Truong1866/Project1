@@ -41,8 +41,8 @@ ___
 ---
 ## Yêu cầu hệ thống
 
-OS: Windows / Linux
-Python: Phiên bản 3.9 - 3.11 (Khuyến nghị 3.11)  
+OS: Windows / Linux  
+Python: Phiên bản 3.9 - 3.11 (Khuyến nghị 3.11)   
 Git: Để clone repository  
 Phần cứng: Khuyến nghị có GPU hoặc iGPU mạnh để xử lý inference các mô hình AI.
 
@@ -94,7 +94,7 @@ cd your-repo-name
 
 -------------------------------
 __Bước 3:__ Tạo môi trường ảo (Virtual Environment) - Khuyến nghị
-+ Tạo môi trường ảo có tên 'venv'
+Tạo môi trường ảo có tên 'venv'
 ```script
 python -m venv venv
 ```
@@ -102,7 +102,7 @@ python -m venv venv
 ```script
 venv\Scripts\activate
 ```
-Kích hoạt môi trường (Linux/macOS)
++ Kích hoạt môi trường (Linux/macOS)
 ```script
 source venv/bin/activate
 ```
@@ -129,8 +129,8 @@ python main.py
 
 ---
 ## Cấu trúc thư mục
-__Project__
-   ├── BusinessLayer/: Chứa logic nghiệp vụ cốt lõi (Inference, Camera Manager, Pipeline, Notifier...).
+__Project__  
+   ├── BusinessLayer/: Chứa logic nghiệp vụ cốt lõi (Inference, Camera Manager, Pipeline, Notifier...).  
    ├── DataLayer/: Xử lý lưu trữ và truy xuất dữ liệu (SQLite, Vector DB, Repositories).  
    ├──PresentLayer/: Giao diện người dùng (UI Components, Main Window).  
    ├──Tools/: Các công cụ hỗ trợ (Benchmark, Đăng ký khuôn mặt mới...).  
