@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QButtonGroup, QCheckBox, QDoubleSpinBox, QFileDia
                                QStackedWidget, QTabWidget, QToolButton, QVBoxLayout, QWidget)
 
 from BusinessLayer.input_manager import SourceKind
+from PresentLayer.Component.focus_settings import build_focus_tab
 
 MODE_WEBCAM, MODE_STREAM, MODE_FILE = SourceKind.WEBCAM, SourceKind.STREAM, SourceKind.FILE
 _PAGE = {None: 0, MODE_WEBCAM: 1, MODE_STREAM: 2, MODE_FILE: 3}
@@ -56,6 +57,7 @@ class SettingsPanel(QFrame):
         tabs.addTab(self._build_sources(), "Nguồn")
         tabs.addTab(self._build_detection(defaults), "Phát hiện")
         tabs.addTab(self._build_faces(), "Khuôn mặt")
+        tabs.addTab(build_focus_tab(self, defaults), "Focus")
         root.addWidget(tabs)
 
     # ================================================================== tab Nguồn
