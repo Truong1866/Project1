@@ -6,7 +6,8 @@ app:
   log_level: INFO
 
 models:
-  yolo_path: Models/yolov8n_openvino_model   # thư mục chứa .xml/.bin (hoặc file .xml / .onnx)
+  yolo_path: Models/yolov8n_640_openvino_model       # thư mục chứa .xml/.bin (hoặc file .xml / .onnx)
+  yolo_roi_path: Models/yolov8n_640_openvino_model   # (tuỳ chọn) model nhỏ cho focus tiết kiệm, vd Models/yolov8n_320_openvino_model
   face_dir: Models/face_models               # root của insightface (chứa models/buffalo_s)
   device: GPU                                # GPU | CPU | AUTO  (GPU lỗi sẽ tự rơi về CPU)
   imgsz: 640                                 # chỉ dùng khi model có shape động
@@ -58,6 +59,26 @@ face:
   interval_unknown: 1.50   # giây giữa 2 lần kiểm tra lại người đã bị gắn "lạ"
   max_per_run: 2           # tối đa số mặt xử lý trong 1 lượt AI
 
+# ---------- Focus (bám theo một mục tiêu) ----------
+focus:
+  default_mode: eco        # eco = tiết kiệm (chỉ quét quanh mục tiêu) | full = toàn bộ (quét cả khung)
+  acquire_frames: 3        # số lượt quét xác nhận mục tiêu trước khi bám (zoom dần trong lúc này)
+  full_fps: 12             # nhịp quét khi ACQUIRE / chế độ full
+  eco_fps_min: 6           # eco: nhịp quét khi mục tiêu đứng yên
+  eco_fps_max: 15          # eco: nhịp quét khi mục tiêu chạy nhanh
+  min_margin: 0.30         # lề ROI tối thiểu quanh người (tỉ lệ kích thước người)
+  speed_gain: 1.5          # hệ số nới ROI theo độ dời dự kiến
+  expand_on_miss: 1.6      # quét hụt 1 lần -> nới ROI thêm ×1.6
+  min_roi: 80              # nửa cạnh ROI tối thiểu (px)
+  lost_misses: 4           # hụt liên tiếp bấy nhiêu lượt -> coi là mất mục tiêu
+  lost_timeout: 1.5        # hoặc quá bấy nhiêu giây không thấy
+  lost_probe_fps: 2        # khi mất mục tiêu: nhịp quét thăm dò (cổng AI đang đóng) để tìm lại
+  zoom_margin: 1.8         # chiều cao khung nhìn / chiều cao người (nhỏ = zoom nhiều hơn)
+  max_zoom: 4.0
+  smooth_time: 0.25        # giây: độ mượt camera ảo (vị trí)
+  zoom_smooth_time: 0.5    # giây: độ mượt zoom
+  reid_threshold: 0.72     # ngưỡng ngoại hình (0..1) để nhận lại mục tiêu khi chưa biết tên
+
 # ---------- Sự kiện ----------
 events:
   cooldown_sec: 10         # cùng (nguồn, loại, tên) không báo lại trong N giây
@@ -70,7 +91,6 @@ ui:
   refresh_ms: 16
   tiles_per_page: 4
 
-# ---------- Discord ----------
 # ---------- Discord ----------
 discord:
   enabled: true

@@ -1,6 +1,7 @@
 from ultralytics import YOLO
 from insightface.app import FaceAnalysis
 import os
+import shutil
 from pathlib import Path
 
 current_file_path = Path(__file__).resolve()
@@ -24,8 +25,30 @@ def setup_yolo():
     print("-> Đang biên dịch sang OpenVINO (FP16) cho Intel Iris Xe iGPU...")
     # Lệnh export: half=True sẽ chuyển trọng số sang FP16 (Float16)
     # Giúp giảm một nửa dung lượng RAM/VRAM và tăng tốc độ xử lý mà không giảm độ chính xác
-    export_path = model.export(format='openvino', quantize = 16)
-    print(f"=> [Thành công] Mô hình đã được chuyển hóa và lưu tại thư mục: {export_path}")
+    default_export_dir = models_dir / 'yolov8n_openvino_model'
+    # --- Xuất bản imgsz = 640 ---
+    print("-> Đang xuất bản imgsz=640...")
+    model.export(format='openvino', imgsz=640, quantize = 'FP16')
+    export_640_path = models_dir / 'yolov8n_640_openvino_model'
+
+    # Xóa thư mục cũ nếu đã tồn tại và đổi tên thư mục mặc định thành tên mới
+    if export_640_path.exists():
+        shutil.rmtree(export_640_path)
+    os.rename(default_export_dir, export_640_path)
+
+    # --- Xuất bản imgsz = 320 ---
+    print("-> Đang xuất bản imgsz=320...")
+    model.export(format='openvino', imgsz=320, quantize = 'FP16')
+    export_320_path = models_dir / 'yolov8n_320_openvino_model'
+
+    # Xóa thư mục cũ nếu đã tồn tại và đổi tên thư mục mặc định thành tên mới
+    if export_320_path.exists():
+        shutil.rmtree(export_320_path)
+    os.rename(default_export_dir, export_320_path)
+
+    print(f"=> [Thành công] Mô hình đã được chuyển hóa và lưu tại 2 thư mục:")
+    print(f"   1. {export_640_path}")
+    print(f"   2. {export_320_path}")
 
 
 def setup_face_models():

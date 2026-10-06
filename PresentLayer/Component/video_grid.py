@@ -1,4 +1,9 @@
-"""Khu vực video chính: 1 nguồn -> toàn khung; >=2 nguồn -> chia 4 phần (2x2); >4 nguồn -> phân trang, mỗi trang 4 ô."""
+"""Khu vực video chính: 1 nguồn -> toàn khung; >=2 nguồn -> chia 4 phần (2x2); >4 nguồn -> phân trang, mỗi trang 4 ô.
+
+FOCUS:
+  * eco  : ô của nguồn đang focus được phóng to chiếm cả vùng (các ô khác tạm ẩn); ô tự zoom vào mục tiêu.
+  * full : ô nguồn chính (cả khung + box) nằm bên trái, FocusPane (mục tiêu phóng to, không box) nằm ngay bên phải.
+"""
 from __future__ import annotations
 
 import math
@@ -6,12 +11,16 @@ import math
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
+from PresentLayer.Component.focus_pane import FocusPane
 from PresentLayer.Component.video_tile import EmptyTile, VideoTile
 
 
 class VideoGrid(QWidget):
     removeRequested = Signal(str)
     selectionChanged = Signal(str)
+    targetPicked = Signal(str, int)         # source_id, track_id  (nhấp chọn mục tiêu để focus)
+    focusButtonClicked = Signal(str)        # nút 🎯 trên một ô
+    focusCancelRequested = Signal()
 
     def __init__(self, pipeline, per_page: int = 4, parent=None):
         super().__init__(parent)
@@ -19,12 +28,18 @@ class VideoGrid(QWidget):
         self.per_page = per_page
         self.show_motion = False
         self.selected_id: str | None = None
+        self.pick_mode = False
+        self.focus_sid: str | None = None
+        self.focus_mode = "eco"
 
         self._order: list[str] = []
         self._tiles: dict[str, VideoTile] = {}
         self._empty = [EmptyTile(self) for _ in range(per_page)]
         self._page = 0
         self._focus: str | None = None
+        self._focus_pane = FocusPane(self)
+        self._focus_pane.hide()
+        self._focus_pane.cancelRequested.connect(self.focusCancelRequested)
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
@@ -67,12 +82,17 @@ class VideoGrid(QWidget):
                 tile.closeRequested.connect(self.removeRequested)
                 tile.clicked.connect(self._on_clicked)
                 tile.doubleClicked.connect(self._on_double_clicked)
+                tile.targetClicked.connect(self.targetPicked)
+                tile.focusButtonClicked.connect(self.focusButtonClicked)
+                tile.set_pick_mode(self.pick_mode)
                 self._tiles[sid] = tile
         self._order = ids
         if self.selected_id not in ids:
             self.selected_id = None
         if self._focus not in ids:
             self._focus = None
+        if self.focus_sid not in ids:
+            self.focus_sid = None
         self._page = max(0, min(self._page, self.page_count - 1))
         self._relayout()
 
@@ -85,12 +105,29 @@ class VideoGrid(QWidget):
         self._relayout()
 
     def visible_ids(self) -> list[str]:
+        if self.focus_sid in self._tiles:
+            return [self.focus_sid]
         if self._focus:
             return [self._focus]
         if len(self._order) <= 1:
             return list(self._order)
         start = self._page * self.per_page
         return self._order[start:start + self.per_page]
+
+    # ------------------------------------------------------------------ focus
+    def set_focus(self, sid: str | None, mode: str = "eco") -> None:
+        """sid=None: tắt bố cục focus. Gọi mỗi nhịp cũng được (chỉ dựng lại bố cục khi có thay đổi)."""
+        if sid not in self._tiles:
+            sid = None
+        if (sid, mode) == (self.focus_sid, self.focus_mode):
+            return
+        self.focus_sid, self.focus_mode = sid, mode
+        self._relayout()
+
+    def set_pick_mode(self, on: bool) -> None:
+        self.pick_mode = on
+        for t in self._tiles.values():
+            t.set_pick_mode(on)
 
     # ------------------------------------------------------------------ tương tác
     def _on_clicked(self, sid: str) -> None:
@@ -110,6 +147,11 @@ class VideoGrid(QWidget):
             w = self._grid.takeAt(0).widget()
             if w is not None:
                 w.hide()
+        fsid = self.focus_sid if self.focus_sid in self._tiles else None
+        if fsid:
+            self._layout_focus(fsid)
+            return
+
         ids = self.visible_ids()
         total = len(self._order)
         single = bool(self._focus) or total <= 1
@@ -140,9 +182,37 @@ class VideoGrid(QWidget):
         self._btn_prev.setEnabled(self._page > 0)
         self._btn_next.setEnabled(self._page < pages - 1)
 
+    def _layout_focus(self, sid: str) -> None:
+        tile = self._tiles[sid]
+        self._grid.addWidget(tile, 0, 0)
+        tile.show()
+        if self.focus_mode == "full":
+            self._grid.addWidget(self._focus_pane, 0, 1)
+            self._focus_pane.show()
+            self._grid.setColumnStretch(0, 3)
+            self._grid.setColumnStretch(1, 2)
+        else:
+            self._grid.setColumnStretch(0, 1)
+            self._grid.setColumnStretch(1, 0)
+        self._grid.setRowStretch(0, 1)
+        self._grid.setRowStretch(1, 0)
+        for s, t in self._tiles.items():
+            t.selected = (s == self.selected_id)
+        self._nav.setVisible(False)
+
     # ------------------------------------------------------------------ làm mới từ timer
     def refresh(self) -> None:
         for sid in self.visible_ids():
-            view = self.pipeline.get_view(sid)
-            if view is not None and sid in self._tiles:
-                self._tiles[sid].update_view(view, self.show_motion)
+            tile = self._tiles.get(sid)
+            if tile is None:
+                continue
+            aspect = None
+            if sid == self.focus_sid:        # camera ảo cần tỉ lệ của widget sẽ hiển thị khung nhìn
+                target = self._focus_pane if self.focus_mode == "full" else tile
+                aspect = max(0.2, target.width() / max(1, target.height()))
+            view = self.pipeline.get_view(sid, aspect)
+            if view is None:
+                continue
+            tile.update_view(view, self.show_motion)
+            if sid == self.focus_sid and self.focus_mode == "full":
+                self._focus_pane.update_view(view)
