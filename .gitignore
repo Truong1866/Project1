@@ -10,7 +10,8 @@ Tools/benchmark/yolov8n.pt
 Tools/benchmark/coco128.yaml
 Tools/benchmark/input.mp4
 DataLayer/known_faces.pkl
-Tools/benchmark/yolov8n_ov_*
+Tools/benchmark/yolov8n_*
+Tools/benchmark/yolov*
 Data
 logs
 input.jpg
