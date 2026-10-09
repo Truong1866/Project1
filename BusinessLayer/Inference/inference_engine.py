@@ -112,6 +112,14 @@ class InferenceEngine:
             det = self.yolo(frame)
         return self._to_persons(det)
 
+    def detect_persons_roi_model(self, frame: np.ndarray) -> list[dict]:
+        """Quét toàn khung bằng model ROI nhỏ (yolo_roi, imgsz=320) nếu có; fallback về model chính.
+        Dùng khi đang focus eco: nhẹ hơn model 640 nhưng vẫn quét toàn bộ khung hình."""
+        model = self.yolo_roi if self.yolo_roi is not None else self.yolo
+        with self._lock:
+            det = model(frame)
+        return self._to_persons(det)
+
     def detect_persons_roi(self, frame: np.ndarray, roi) -> list[dict]:
         """Chỉ quét vùng roi=(x1,y1,x2,y2); trả về box theo toạ độ ảnh GỐC."""
         h, w = frame.shape[:2]

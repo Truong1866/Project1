@@ -1,4 +1,4 @@
-"""Điều khiển FOCUS: bám theo một mục tiêu, phóng to mượt bằng "camera ảo", thu hẹp vùng quét theo độ dời.
+"""Điều khiển FOCUS: bam theo một mục tiêu, phóng to mượt bằng "camera ảo".
 
 Máy trạng thái của mỗi nguồn:
 
@@ -8,16 +8,24 @@ Máy trạng thái của mỗi nguồn:
     cancel() ở bất kỳ trạng thái nào -> IDLE
 
   * ACQUIRE : quét toàn khung 2-3 lượt để xác nhận mục tiêu; camera ảo zoom DẦN vào trong lúc quét.
-  * TRACK   : theo dõi. Chế độ "eco" chỉ quét vùng ROI nhỏ quanh vị trí DỰ ĐOÁN, ROI nhỏ/lớn tuỳ độ dời
-              (đứng yên -> ROI nhỏ + quét thưa; chạy nhanh -> ROI lớn + quét dày). Chế độ "full" quét cả khung.
+  * TRACK   : theo dõi. Chế độ "eco" dùng YOLO nhỏ (320px) quét TOÀN KHUNG (không dùng ROI),
+              tần suất thích ứng theo tốc độ. Không chạy ByteTrack. Không phát hiện chuyển động.
+              Chế độ "full" quét cả khung bằng model chính + ByteTrack.
   * LOST    : mục tiêu bị che/rời đi -> camera zoom xa ra dần, hệ thống về trạng thái bình thường
               (phát hiện chuyển động + quét thăm dò thưa) cho tới khi tìm lại được hoặc người dùng huỷ.
 
-Chuyển động mượt:
-  * Bộ lọc Kalman gia tốc không đổi (x, y, vận tốc, gia tốc) cho tâm mục tiêu, chạy theo nhịp AI (~10 lần/giây).
-  * Camera ảo chạy theo nhịp giao diện (~60 lần/giây): lò xo giảm chấn tới hạn bám theo vị trí ngoại suy,
-    có feed-forward theo vận tốc/gia tốc TƯƠNG ĐỐI (vận tốc mục tiêu trừ vận tốc camera) nên không bị giật,
-    không bị trễ khi mục tiêu đi đều và vẫn êm khi mục tiêu đổi hướng.
+Chuyển động (từ điểm tâm box YOLO):
+  * Bộ lọc Kalman gia tốc không đổi (x, y, vận tốc, gia tốc) cho tâm mục tiêu, chạy theo nhịp AI.
+  * Speed damping: vận tốc được nhân hệ số suy giảm tỉ lệ nghịch với tốc độ — chuyển động nhỏ tắt
+    rất nhanh, chuyển động lớn giữ nguyên. Tránh trôi camera khi người đứng yên mà box rung nhỏ.
+  * Camera ảo chạy theo nhịp giao diện (~60 lần/giây): lò xo giảm chấn tới hạn bám theo vị trí
+    ngoại suy, feed-forward theo vận tốc/gia tốc TƯƠNG ĐỐI.
+
+Deadzone & Stable Center (chống dao động khi cắt khung):
+  * DEADZONE_RATIO : bán kính vùng chết tính theo chiều cao người. Bên trong vùng này không cập nhật
+                     stable_center -> viewport cắt không thay đổi khi box rung nhỏ.
+  * COMMIT_RATIO   : tâm box mới phải cách stable_center ít nhất khoảng này mới cập nhật
+                     (đảm bảo người thực sự di chuyển, không phải dao động detection).
 
 Lớp này KHÔNG phụ thuộc Qt hay OpenVINO; chỉ cần numpy + cv2.
 """
@@ -33,8 +41,8 @@ import numpy as np
 from BusinessLayer.Inference.tracker import Track
 from DataLayer.vector_db import UNKNOWN
 
-MODE_ECO = "eco"      # tiết kiệm: chỉ quét quanh mục tiêu, màn chính tự phóng to
-MODE_FULL = "full"    # toàn bộ: quét cả khung, mục tiêu hiện ở ô riêng bên cạnh nguồn chính
+MODE_ECO = "eco"      # tiết kiệm: dùng YOLO 320 toàn khung, không ByteTrack, màn chính tự phóng to
+MODE_FULL = "full"    # toàn bộ: quét cả khung + ByteTrack, mục tiêu hiện ở ô riêng bên cạnh
 
 
 class FocusState:
@@ -68,10 +76,21 @@ class FocusTrack(Track):
 
 # ====================================================================== ước lượng chuyển động
 class MotionEstimator:
-    """Kalman gia tốc không đổi cho (cx, cy). Làm việc trong đơn vị chuẩn hoá = chiều cao khung hình."""
+    """Kalman gia tốc không đổi cho (cx, cy). Làm việc trong đơn vị chuẩn hoá = chiều cao khung hình.
+
+    Đặc điểm thêm so với bộ lọc Kalman thuần tuý:
+      - Speed damping: sau mỗi lần update, vận tốc được nhân hệ số <= 1 tỉ lệ nghịch với tốc độ.
+        Chuyển động rất nhỏ -> hệ số gần 0, vận tốc tắt ngay; chuyển động lớn -> hệ số ~1, giữ nguyên.
+      - Tham số DAMP_SPEED_THRESHOLD: ngưỡng tốc độ (đơn vị chiều-cao-người/s) dưới đó bắt đầu damp.
+      - Tham số DAMP_MIN_FACTOR    : hệ số suy giảm tối thiểu khi gần như đứng yên.
+    """
 
     MAX_EXTRAP = 0.35        # giây: không ngoại suy xa hơn (dữ liệu cũ thì không tin)
     A_MAX = 4.0              # chiều-cao-khung / s²
+
+    # Speed damping: tốc độ < DAMP_SPEED_THRESHOLD * person_height/s thì damp mạnh
+    DAMP_SPEED_THRESHOLD = 0.08   # chiều-cao-người / giây (chuẩn hoá theo scale)
+    DAMP_MIN_FACTOR = 0.10        # hệ số giữ lại tối thiểu khi gần đứng yên
 
     def __init__(self, scale: float, jerk_std: float = 8.0, meas_std: float = 0.012):
         self.scale = max(float(scale), 1.0)
@@ -79,11 +98,16 @@ class MotionEstimator:
         self.r = float(meas_std) ** 2
         self.x = np.zeros((3, 2))
         self.P = np.diag([self.r, 0.5, 5.0])
+        self._person_height_norm = 0.3   # chiều cao người / scale, cập nhật từ bên ngoài
 
     def reset(self, pos_px) -> None:
         self.x = np.zeros((3, 2))
         self.x[0] = np.asarray(pos_px, dtype=np.float64) / self.scale
         self.P = np.diag([self.r, 0.5, 5.0])
+
+    def set_person_height(self, height_px: float) -> None:
+        """Cho bộ lọc biết chiều cao người (px) để tính ngưỡng speed damping."""
+        self._person_height_norm = max(height_px, 1.0) / self.scale
 
     def predict(self, dt: float) -> None:
         if dt <= 0:
@@ -104,6 +128,14 @@ class MotionEstimator:
         self.x = self.x + np.outer(K, z - self.x[0])
         P = self.P - np.outer(K, self.P[0, :])
         self.P = (P + P.T) / 2
+        # --- speed damping: giảm nhanh vận tốc khi chuyển động nhỏ ---
+        speed_norm = float(np.hypot(*self.x[1]))          # đơn vị: 1/s (đã chuẩn hoá)
+        threshold = self.DAMP_SPEED_THRESHOLD * self._person_height_norm
+        if threshold > 0 and speed_norm < threshold:
+            # factor = 0 khi speed=0, factor = 1 khi speed = threshold
+            factor = self.DAMP_MIN_FACTOR + (1.0 - self.DAMP_MIN_FACTOR) * (speed_norm / threshold)
+            self.x[1] *= factor
+            self.x[2] *= factor   # giảm gia tốc cùng lúc để tránh tích luỹ
 
     # ---- đại lượng đọc ra (đơn vị pixel)
     @property
@@ -150,23 +182,30 @@ def _smoothstep(p: float) -> float:
 
 # ====================================================================== controller
 class FocusController:
+    # --- hằng số deadzone & stable-center ---
+    DEADZONE_RATIO = 0.04     # bán kính vùng chết (tỉ lệ chiều cao người). Dao động nhỏ hơn: bỏ qua.
+    COMMIT_RATIO = 0.10       # tâm mới phải xa stable_center ít nhất (tỉ lệ chiều cao người) để cập nhật.
+
     def __init__(self, cfg: dict | None = None):
         c = cfg or {}
         self.acquire_frames = max(2, int(c.get("acquire_frames", 3)))
         self.full_fps = float(c.get("full_fps", 12))
         self.eco_fps_min = float(c.get("eco_fps_min", 6))
         self.eco_fps_max = float(c.get("eco_fps_max", 15))
-        self.min_margin = float(c.get("min_margin", 0.30))       # lề tối thiểu quanh người (tỉ lệ kích thước)
-        self.speed_gain = float(c.get("speed_gain", 1.5))        # nhân độ dời dự kiến khi nới ROI
-        self.expand = float(c.get("expand_on_miss", 1.6))        # nới ROI mỗi lần quét hụt
-        self.min_roi = float(c.get("min_roi", 80))               # nửa cạnh ROI tối thiểu (px)
+        self.min_margin = float(c.get("min_margin", 0.30))
+        self.speed_gain = float(c.get("speed_gain", 1.5))
+        self.expand = float(c.get("expand_on_miss", 1.6))
+        self.min_roi = float(c.get("min_roi", 80))
         self.lost_misses = int(c.get("lost_misses", 4))
         self.lost_timeout = float(c.get("lost_timeout", 1.5))
-        self.zoom_margin = float(c.get("zoom_margin", 1.8))      # chiều cao khung nhìn / chiều cao người
+        self.zoom_margin = float(c.get("zoom_margin", 1.8))
         self.max_zoom = float(c.get("max_zoom", 4.0))
-        self.smooth_time = float(c.get("smooth_time", 0.25))     # giây: độ "mượt" camera ảo (vị trí)
+        self.smooth_time = float(c.get("smooth_time", 0.25))
         self.zoom_smooth_time = float(c.get("zoom_smooth_time", 0.5))
         self.reid_threshold = float(c.get("reid_threshold", 0.72))
+        # --- tần suất quét mặt khi focus (chậm hơn chế độ bình thường) ---
+        self.face_interval_pending_focus = float(c.get("face_interval_pending_focus", 1.0))
+        self.face_interval_unknown_focus = float(c.get("face_interval_unknown_focus", 3.0))
 
         self._lock = threading.RLock()
         self.state = FocusState.IDLE
@@ -191,6 +230,8 @@ class FocusController:
         self.zoom_h = 480.0
         self.zoom_v = 0.0
         self._t_cam = 0.0
+        # --- stable center (cho cắt khung, chống dao động) ---
+        self.stable_center: np.ndarray | None = None
 
     @property
     def active(self) -> bool:
@@ -213,7 +254,10 @@ class FocusController:
             self.box = b
             self.size = (max(b[2] - b[0], 1.0), max(b[3] - b[1], 1.0))
             self.est = MotionEstimator(self.fh)
-            self.est.reset(((b[0] + b[2]) / 2, (b[1] + b[3]) / 2))
+            self.est.set_person_height(self.size[1])
+            cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+            self.est.reset((cx, cy))
+            self.stable_center = np.array([cx, cy])
             self.sig = self._signature(frame, b)
             self.t_obs = self.last_seen = now
             self.acq_hits = 1                              # lần xác định ban đầu (chính là lần nhấp chọn)
@@ -256,25 +300,9 @@ class FocusController:
             return 1.0 / (self.eco_fps_min + (self.eco_fps_max - self.eco_fps_min) * k)
 
     def scan_roi(self, frame_shape, now: float):
-        """Vùng quét (x1,y1,x2,y2) cho chế độ eco khi đang TRACK; None = quét toàn khung."""
-        with self._lock:
-            if self.state != FocusState.TRACK or self.mode != MODE_ECO or self.est is None:
-                return None
-            fh, fw = frame_shape[:2]
-            cx, cy = self.est.extrapolate(now - self.t_obs)
-            bw, bh = self.size
-            dt = max(self.scan_interval(), now - self.t_obs)
-            expected = self.est.speed * dt + 0.5 * self.est.acc_mag * dt * dt
-            disp = max(expected, self.last_disp)                   # độ dời: dự kiến vs thực tế lần trước
-            grow = self.expand ** self.misses                      # hụt thì nới dần, tới toàn khung thì thôi
-            pad = 0.04 * bh
-            hw = max(self.min_roi, (bw / 2 * (1 + self.min_margin) + self.speed_gain * disp + pad) * grow)
-            hh = max(self.min_roi, (bh / 2 * (1 + self.min_margin) + self.speed_gain * disp + pad) * grow)
-            x1, y1 = max(0.0, cx - hw), max(0.0, cy - hh)
-            x2, y2 = min(float(fw), cx + hw), min(float(fh), cy + hh)
-            if (x2 - x1) * (y2 - y1) > 0.7 * fw * fh or x2 - x1 < 16 or y2 - y1 < 16:
-                return None
-            return int(x1), int(y1), int(math.ceil(x2)), int(math.ceil(y2))
+        """Không còn dùng trong chế độ eco (eco giờ quét toàn khung bằng YOLO 320).
+        Giữ lại để tương thích với các lời gọi cũ; luôn trả về None."""
+        return None
 
     # ------------------------------------------------------------------ ngoại hình
     @staticmethod
@@ -373,7 +401,8 @@ class FocusController:
         center = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2])
         prev = self.est.pos.copy()
         self.est.predict(now - self.t_obs)
-        self.est.update(center)
+        self.est.set_person_height(max(box[3] - box[1], 1.0))
+        self.est.update(center)             # speed damping áp dụng bên trong update()
         self.last_disp = float(np.hypot(*(center - prev)))
         a = 0.35
         self.size = (self.size[0] * (1 - a) + max(box[2] - box[0], 1.0) * a,
@@ -390,6 +419,20 @@ class FocusController:
         new_sig = self._signature(frame, box)               # cập nhật ngoại hình chậm (tránh học nhầm khi bị che)
         if new_sig is not None:
             self.sig = new_sig if self.sig is None else [0.9 * s + 0.1 * n for s, n in zip(self.sig, new_sig)]
+        # --- cập nhật stable_center chỉ khi tâm dịch đủ xa (chống dao động khi đứng im) ---
+        person_h = self.size[1]
+        deadzone = self.DEADZONE_RATIO * person_h
+        commit_dist = self.COMMIT_RATIO * person_h
+        if self.stable_center is None:
+            self.stable_center = center.copy()
+        else:
+            dist = float(np.hypot(*(center - self.stable_center)))
+            if dist > commit_dist:
+                # Di chuyển stable_center đến vị trí tâm mới nhưng giữ lề deadzone:
+                # dịch vào gần center thêm một đoạn = dist - deadzone, theo hướng center
+                move = max(0.0, dist - deadzone)
+                if dist > 0:
+                    self.stable_center = self.stable_center + (center - self.stable_center) * (move / dist)
 
     def _to_lost(self) -> None:
         self.state = FocusState.LOST
@@ -401,11 +444,13 @@ class FocusController:
         center = ((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
         self.est.reset(center)
         self.size = (max(box[2] - box[0], 1.0), max(box[3] - box[1], 1.0))
+        self.est.set_person_height(self.size[1])
         self.box = box
         self.t_obs = self.last_seen = now
         self.misses = 0
         self.last_disp = 0.0
         self.acq_hits = 1
+        self.stable_center = np.array(list(center))
         self.state = FocusState.ACQUIRE
         ft = self.ftrack
         ft.box = box
@@ -497,15 +542,28 @@ class FocusController:
             return False
 
     def viewport(self, aspect: float | None = None):
-        """Khung nhìn (x1,y1,x2,y2) theo toạ độ ảnh gốc, đúng tỉ lệ `aspect`, nằm trọn trong khung hình."""
+        """Khung nhìn (x1,y1,x2,y2) theo toạ độ ảnh gốc, đúng tỉ lệ `aspect`, nằm trọn trong khung hình.
+
+        Dùng stable_center (chống dao động) khi đang TRACK/ACQUIRE để tâm cắt không nhảy lung tung.
+        """
         with self._lock:
             if not self.view_active:
                 return None
             fw, fh = float(self.fw), float(self.fh)
             aspect = aspect if aspect and aspect > 0 else fw / fh
             vw, vh = self._vp_size(aspect)
-            cx = min(max(self.cam_c[0], vw / 2), fw - vw / 2)
-            cy = min(max(self.cam_c[1], vh / 2), fh - vh / 2)
+            # Ưu tiên stable_center khi đang bám (tránh dao động nhỏ làm rung viewport)
+            if self.state in (FocusState.ACQUIRE, FocusState.TRACK) and self.stable_center is not None:
+                cx_ref = float(self.stable_center[0])
+                cy_ref = float(self.stable_center[1])
+                # Blending nhẹ cam_c vào để viewport vẫn mượt
+                cx = cx_ref * 0.7 + float(self.cam_c[0]) * 0.3
+                cy = cy_ref * 0.7 + float(self.cam_c[1]) * 0.3
+            else:
+                cx = float(self.cam_c[0])
+                cy = float(self.cam_c[1])
+            cx = min(max(cx, vw / 2), fw - vw / 2)
+            cy = min(max(cy, vh / 2), fh - vh / 2)
             return (cx - vw / 2, cy - vh / 2, cx + vw / 2, cy + vh / 2)
 
     @property

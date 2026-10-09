@@ -11,10 +11,13 @@ Mô hình luồng (mỗi nguồn có luồng đọc riêng trong InputManager):
   * Cổng AI của mỗi nguồn: IDLE --(chuyển động hợp lệ liên tục)--> ACTIVE --(hết người một lúc)--> IDLE.
     Trong ACTIVE mà người đứng yên (không còn chuyển động), AI vẫn chạy ở tần suất thấp để theo dõi tiếp.
 
-FOCUS (BusinessLayer/focus.py): khi một nguồn đang focus (ACQUIRE/TRACK), FocusController quyết định nhịp quét và vùng quét,
-cổng chuyển động bị bỏ qua. Chế độ eco chỉ quét ROI quanh mục tiêu (không chạy ByteTrack, không nhận diện mặt người khác);
-chế độ full vẫn quét toàn khung + ByteTrack như bình thường. Khi mất mục tiêu (LOST) nguồn trở về trạng thái bình thường
-+ quét thăm dò thưa cho tới khi tìm lại được hoặc người dùng huỷ.
+FOCUS (BusinessLayer/focus.py): khi một nguồn đang focus (ACQUIRE/TRACK), FocusController quyết định nhịp quét.
+  - KHÔNG phát hiện chuyển động (bỏ qua hoàn toàn).
+  - Chế độ eco: dùng model YOLO nhỏ (yolo_roi_path, imgsz=320) quét TOÀN KHUNG (không ROI),
+    không chạy ByteTrack, không vẽ khung trên màn hình focus.
+    Tần suất quét mặt giảm so với chế độ bình thường.
+  - Chế độ full: quét cả khung + ByteTrack như bình thường.
+  - Khi mất mục tiêu (LOST) nguồn trở về trạng thái bình thường + quét thăm dò thưa.
 """
 from __future__ import annotations
 
@@ -368,14 +371,16 @@ class SmartVisionPipeline:
                 fc = ctx.focus
                 focusing = fc.active and fc.state != FocusState.LOST
                 fid, frame = ctx.input.get_frame()
-                gap = 0.0 if focusing else interval           # focus: nhịp quét do FocusController quyết định
+                # Khi đang focus: không cần chờ interval (nhịp AI do FocusController quyết định)
+                gap = 0.0 if focusing else interval
                 if frame is None or fid == ctx.last_motion_fid or now - ctx.last_motion_ts < gap:
                     continue
                 ctx.last_motion_fid, ctx.last_motion_ts = fid, now
                 did_work = True
                 try:
                     if focusing:
-                        ctx.gate = ACTIVE                     # bỏ qua phát hiện chuyển động khi đang bám mục tiêu
+                        # FOCUS: bỏ qua phát hiện chuyển động hoàn toàn, giữ cổng AI mở
+                        ctx.gate = ACTIVE
                         ctx.motion_boxes, ctx.motion_rejected = [], []
                         ctx.motion_stale = True
                     else:
@@ -388,7 +393,8 @@ class SmartVisionPipeline:
                     if self._ai_due(ctx, now):
                         ctx.ai_pending = True
                         ctx.last_ai_time = now
-                        roi = fc.scan_roi(frame.shape, now) if focusing else None
+                        # Focus eco: không dùng ROI (scan_roi trả về None), quét toàn frame bằng YOLO nhỏ
+                        roi = None
                         self._queue.put((ctx, frame, roi, now))
                 except Exception:
                     log.exception("Lỗi luồng chuyển động (%s)", ctx.name)
@@ -462,29 +468,33 @@ class SmartVisionPipeline:
         ts = ts if ts is not None else time.perf_counter()
         fc = ctx.focus
         if fc.active and fc.mode == MODE_ECO and fc.state == FocusState.TRACK:
-            self._run_focus_eco(ctx, frame, roi, ts)
+            self._run_focus_eco(ctx, frame, ts)
         else:
             self._run_normal_ai(ctx, frame, ts)
 
-    # ------------------------------------------------------------------ eco: chỉ quét vùng quanh mục tiêu
-    def _run_focus_eco(self, ctx: SourceContext, frame: np.ndarray, roi, ts: float) -> None:
+    # ------------------------------------------------------------------ eco: dùng YOLO 320 quét toàn khung
+    def _run_focus_eco(self, ctx: SourceContext, frame: np.ndarray, ts: float) -> None:
+        """Focus eco: detect người bằng model YOLO nhỏ (yolo_roi_path, 320px) trên TOÀN KHUNG.
+        Không ByteTrack. Không vẽ khung (tracks_view = [] -> UI không vẽ box).
+        Tần suất quét mặt giảm so với chế độ bình thường."""
         t0 = time.perf_counter()
         fc = ctx.focus
-        if roi is not None:
-            persons = self.engine.detect_persons_roi(frame, roi)    # chỉ quét ROI, không đụng phần còn lại của khung
-        else:
-            persons = self.engine.detect_persons(frame)
+
+        # Dùng model nhỏ (yolo_roi / 320px) quét toàn khung — nhẹ hơn model 640 chính
+        persons = self.engine.detect_persons_roi_model(frame)
+
         cands = [Cand(np.asarray(p["box"], dtype=np.float64), float(p["confidence"])) for p in persons]
-        match = fc.observe(cands, frame, ts)                         # ghép đúng mục tiêu, cập nhật Kalman + ROI kế tiếp
+        match = fc.observe(cands, frame, ts)                         # ghép đúng mục tiêu, cập nhật Kalman
         now = time.perf_counter()
         ft = fc.ftrack
         if match is not None and ft is not None:
             ctx.person_seen = True
             ctx.last_person_time = now
-            if self._need_face(ft, now):                             # nhận diện mặt chỉ cho mục tiêu (nếu chưa biết là ai)
+            if self._need_face_focus(ft, now, fc):                   # tần suất quét mặt thấp hơn khi focus
                 ft.last_face_try = now
                 self._apply_face(ctx, ft, self.engine.process_faces(frame, ft.tlbr), frame)
-            ctx.tracks_view = [self._to_view(ft, now, focused=True)]
+        # Không đẩy tracks_view: UI eco không vẽ khung người trên màn hình focus
+        ctx.tracks_view = []
         ctx.ai_ms = (time.perf_counter() - t0) * 1000
         if fc.state == FocusState.LOST:                              # mất mục tiêu -> về trạng thái bình thường
             log.info("[%s] Mất mục tiêu focus, quay về chế độ bình thường.", ctx.name)
@@ -532,10 +542,19 @@ class SmartVisionPipeline:
 
     # ------------------------------------------------------------------ nhận diện
     def _need_face(self, t: Track, now: float) -> bool:
+        """Kiểm tra xem track cần quét mặt không (chế độ bình thường)."""
         fc = self.face_cfg
         if t.identity not in (None, UNKNOWN):
             return False  # đã chốt là người quen
         gap = fc.get("interval_pending", 0.3) if t.identity is None else fc.get("interval_unknown", 1.5)
+        return now - t.last_face_try >= gap
+
+    def _need_face_focus(self, t: Track, now: float, fc: FocusController) -> bool:
+        """Kiểm tra track cần quét mặt không khi đang ở chế độ focus (tần suất thấp hơn)."""
+        if t.identity not in (None, UNKNOWN):
+            return False  # đã chốt là người quen
+        gap = (fc.face_interval_pending_focus if t.identity is None
+               else fc.face_interval_unknown_focus)
         return now - t.last_face_try >= gap
 
     def _apply_face(self, ctx: SourceContext, t: Track, faces: list, frame: np.ndarray) -> None:
