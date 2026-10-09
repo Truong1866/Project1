@@ -3,7 +3,7 @@ import time
 import openvino as ov  # noqa: F401  (chỉ để nạp openvino TRƯỚC cv2; KHÔNG tạo ov.Core() ở file này)
 import cv2
 import numpy as np
-from yolov8_openvino import YOLOv8OpenVINO, box_label
+from yolo_native import YOLOOpenVINO, box_label
 import gc
 
 VIDEO_PATH = "input.mp4"  # Đường dẫn video benchmark
@@ -13,7 +13,7 @@ CONF = 0.5
 IOU = 0.4
 CLASSES = [0]  # Chỉ detect Person
 
-MODEL_PATH = ["yolov8n_ov_fp32_640_openvino_model", "yolov8n_ov_fp16_640_openvino_model", "yolov8n_ov_fp32_320_openvino_model", "yolov8n_ov_fp16_320_openvino_model"]
+MODEL_PATH = ["yolov8n_320_openvino_model", "yolov8n_640_openvino_model", "yolov26n_320_openvino_model", "yolov26n_640_openvino_model"]
 GPU_DEVICE = "GPU"  # "GPU" cho đồ họa Intel, hoặc "CPU" nếu muốn benchmark Native CPU
 PERFORMANCE_HINT = "LATENCY"  # "LATENCY" | "THROUGHPUT"
 
@@ -28,10 +28,10 @@ def avg_fps_from_times(times):
     return len(times) / sum(times)
 
 def build_openvino_model(model_path):
-    image_size = int(model_path.split("_")[-1])
+    image_size = int(model_path.split("_")[1])
     print(f"Image size: {image_size}")
     def make(dev):
-        return YOLOv8OpenVINO(
+        return YOLOOpenVINO(
             model_path,
             device=dev,
             imgsz=image_size,  # chỉ dùng nếu model có shape động
