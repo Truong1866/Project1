@@ -78,6 +78,9 @@ focus:
   smooth_time: 0.25        # giây: độ mượt camera ảo (vị trí)
   zoom_smooth_time: 0.5    # giây: độ mượt zoom
   reid_threshold: 0.72     # ngưỡng ngoại hình (0..1) để nhận lại mục tiêu khi chưa biết tên
+  # --- Tần suất quét mặt khi đang focus (thấp hơn chế độ bình thường để tiết kiệm CPU) ---
+  face_interval_pending_focus: 1.0   # giây giữa 2 lần thử nhận diện khi chưa có kết luận (focus)
+  face_interval_unknown_focus: 3.0   # giây giữa 2 lần kiểm tra lại khi đã gắn nhãn "lạ" (focus)
 
 # ---------- Sự kiện ----------
 events:
