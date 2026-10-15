@@ -172,6 +172,26 @@ def non_max_suppression(
     return output
 
 
+
+def postprocess_end2end(
+    prediction: np.ndarray,
+    conf_thres: float = 0.25,
+    classes=None,
+    max_det: int = 300,
+) -> np.ndarray:
+    """
+    Hậu xử lý cho YOLO26 end-to-end (NMS-free).
+    prediction: (1, 300, 6), mỗi dòng = [x1, y1, x2, y2, conf, cls] (toạ độ trong ảnh letterbox).
+    Trả về (n, 6) cùng định dạng với non_max_suppression.
+    """
+    x = prediction[0]
+    x = x[x[:, 4] > conf_thres]
+    if classes is not None:
+        x = x[np.isin(x[:, 5].astype(int), classes)]
+    x = x[np.argsort(-x[:, 4])][:max_det]
+    return x.astype(np.float32)
+
+
 # --------------------------------------------------------------------------------------
 # ultralytics.data.augment.LetterBox (bản numpy/cv2)
 # --------------------------------------------------------------------------------------
@@ -280,7 +300,7 @@ class Detections:
 # --------------------------------------------------------------------------------------
 # Predictor
 # --------------------------------------------------------------------------------------
-class YOLOv8OpenVINO:
+class YOLOOpenVINO:
     """
     Tương đương `DetectionPredictor` của ultralytics nhưng chạy thuần OpenVINO.
 
@@ -384,18 +404,24 @@ class YOLOv8OpenVINO:
         return self.compiled(im)[self.output_layer]
 
     def postprocess(self, preds: np.ndarray, im_shape, orig_shape) -> Detections:
-        """NMS + đưa box về toạ độ ảnh gốc (giống DetectionPredictor.postprocess)."""
-        if preds.ndim == 3 and preds.shape[1] > preds.shape[2]:  # (1, anchors, 4+nc) -> (1, 4+nc, anchors)
-            preds = preds.transpose(0, 2, 1)
-        out = non_max_suppression(
-            preds,
-            self.conf,
-            self.iou,
-            classes=self.classes,
-            agnostic=self.agnostic_nms,
-            max_det=self.max_det,
-            nc=len(self.names) if preds.shape[1] - 4 == len(self.names) else 0,
-        )[0]
+        """Tự nhận dạng: YOLO26 end-to-end (1, 300, 6) hay YOLOv8 / YOLO26 one-to-many (1, 4+nc, anchors)."""
+        if preds.ndim == 3 and preds.shape[-1] == 6:
+            # YOLO26 end-to-end: đã NMS-free, chỉ cần lọc conf / class
+            out = postprocess_end2end(preds, self.conf, self.classes, self.max_det)
+        else:
+            # YOLOv8 hoặc YOLO26 export với end2end=False: cần NMS
+            if preds.ndim == 3 and preds.shape[1] > preds.shape[2]:  # (1, anchors, 4+nc) -> (1, 4+nc, anchors)
+                preds = preds.transpose(0, 2, 1)
+            out = non_max_suppression(
+                preds,
+                self.conf,
+                self.iou,
+                classes=self.classes,
+                agnostic=self.agnostic_nms,
+                max_det=self.max_det,
+                nc=len(self.names) if preds.shape[1] - 4 == len(self.names) else 0,
+            )[0]
+
         boxes = scale_boxes(im_shape[2:], out[:, :4].copy(), orig_shape[:2])
         return Detections(
             boxes=boxes,
@@ -443,11 +469,14 @@ def _parse_args():
 
 def main():
     a = _parse_args()
-    yolo = YOLOv8OpenVINO(
+    yolo = YOLOOpenVINO(
         a.model, a.device, imgsz=a.imgsz, conf=a.conf, iou=a.iou,
         classes=a.classes, agnostic_nms=a.agnostic_nms,
     )
-    print(f"[OpenVINO] device={a.device} | input={yolo.input_layer.shape} | devices={ov.Core().available_devices}")
+    oshape = tuple(yolo.output_layer.shape)
+    mode = "end2end (NMS-free)" if len(oshape) == 3 and oshape[-1] == 6 else "one-to-many + NMS"
+    print(f"[OpenVINO] device={a.device} | input={yolo.input_layer.shape} | output={oshape} | mode={mode} "
+          f"| devices={ov.Core().available_devices}")
 
     src = int(a.source) if a.source.isdigit() else a.source
     is_image = isinstance(src, str) and Path(src).suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}

@@ -6,8 +6,8 @@ app:
   log_level: INFO
 
 models:
-  yolo_path: Models/yolov8n_640_openvino_model       # thư mục chứa .xml/.bin (hoặc file .xml / .onnx)
-  yolo_roi_path: Models/yolov8n_640_openvino_model   # (tuỳ chọn) model nhỏ cho focus tiết kiệm, vd Models/yolov8n_320_openvino_model
+  yolo_path: Models/yolov26n_640_openvino_model       # thư mục chứa .xml/.bin (hoặc file .xml / .onnx)
+  yolo_roi_path: Models/yolov26n_640_openvino_model   # (tuỳ chọn) model nhỏ cho focus tiết kiệm, vd Models/yolov8n_320_openvino_model
   face_dir: Models/face_models               # root của insightface (chứa models/buffalo_s)
   device: GPU                                # GPU | CPU | AUTO  (GPU lỗi sẽ tự rơi về CPU)
   imgsz: 640                                 # chỉ dùng khi model có shape động

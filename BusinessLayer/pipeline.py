@@ -34,6 +34,14 @@ from BusinessLayer.focus import MODE_ECO, MODE_FULL, Cand, FocusController, Focu
 from BusinessLayer.Inference.tracker import ByteTracker, Track
 from BusinessLayer.input_manager import InputManager, SourceKind, classify_source
 from BusinessLayer.motion_detector import MotionDetector
+from BusinessLayer.state_machine import (
+    AIRunMode,
+    AppState,
+    FocusState as SMFocusState,
+    GateState,
+    GateTransition,
+    describe_state,
+)
 from DataLayer.vector_db import UNKNOWN, FaceDatabase
 from Utils.config import Config
 from Utils.event_bus import PERSON_KNOWN, PERSON_UNKNOWN, EventBus
@@ -41,7 +49,9 @@ from Utils.logger import get_logger
 
 log = get_logger("Pipeline")
 
-IDLE, ACTIVE = "idle", "active"
+# Alias tương thích ngược
+IDLE = GateState.IDLE.value
+ACTIVE = GateState.ACTIVE.value
 
 
 @dataclass
@@ -83,8 +93,8 @@ class SourceContext:
                  motion: MotionDetector, tracker: ByteTracker, focus: FocusController):
         self.id, self.name, self.kind = sid, name, kind
         self.input, self.motion, self.tracker, self.focus = inp, motion, tracker, focus
-        # --- cổng AI
-        self.gate = IDLE
+        # --- trạng thái (dùng GateState / FocusState từ state_machine)
+        self.gate: GateState = GateState.IDLE
         self.motion_streak = 0
         self.last_motion_time = 0.0
         self.last_ai_time = 0.0
@@ -102,6 +112,23 @@ class SourceContext:
         self.motion_rejected: list = []
         self.ai_ms = 0.0
         self.cooldown: dict = {}
+
+    def build_app_state(self, now: float, motion_hold: float) -> AppState:
+        """Tổng hợp AppState hiện tại từ các biến nội bộ, để engine tra cứu AIRunMode."""
+        fc = self.focus
+        focus_state_map = {
+            FocusState.ACQUIRE: SMFocusState.ACQUIRE,
+            FocusState.TRACK: SMFocusState.TRACK,
+            FocusState.LOST: SMFocusState.LOST,
+        }
+        sm_focus = focus_state_map.get(fc.state, SMFocusState.IDLE) if fc.active else SMFocusState.IDLE
+        return AppState(
+            gate=self.gate,
+            focus=sm_focus,
+            focus_mode=fc.mode if fc.active else MODE_ECO,
+            is_moving=(now - self.last_motion_time) <= motion_hold,
+            has_person=self.person_seen,
+        )
 
 
 class SmartVisionPipeline:
@@ -240,7 +267,7 @@ class SmartVisionPipeline:
             fstate, flabel = fc.state, fc.label
         return SourceView(
             source_id=sid, name=ctx.name, kind=ctx.kind, status=ctx.input.status, frame_id=fid, frame=frame,
-            fps=ctx.input.measured_fps, progress=ctx.input.progress, gate=ctx.gate, ai_ms=ctx.ai_ms,
+            fps=ctx.input.measured_fps, progress=ctx.input.progress, gate=ctx.gate.value, ai_ms=ctx.ai_ms,
             tracks=ctx.tracks_view, motion_boxes=ctx.motion_boxes, motion_rejected=ctx.motion_rejected,
             focus_state=fstate, focus_mode=fc.mode, focus_label=flabel, viewport=viewport)
 
@@ -338,7 +365,7 @@ class SmartVisionPipeline:
         src = next((t for t in list(ctx.tracker.tracked) if t.track_id == track_id), None)
         now = time.perf_counter()
         ctx.focus.start(tv.box, track_id, src.score if src is not None else 0.9, frame, self.focus_mode, now, src)
-        ctx.gate = ACTIVE                                      # focus tự điều khiển nhịp quét, bỏ qua cổng chuyển động
+        ctx.gate = GateState.ACTIVE                            # focus tự điều khiển nhịp quét, bỏ qua cổng chuyển động
         ctx.last_ai_time = 0.0
         self._focus_sid = sid
         return True, f"Đang focus: {ctx.focus.label}"
@@ -356,7 +383,7 @@ class SmartVisionPipeline:
         ctx.tracker.reset()
         ctx.tracks_view = []
         ctx.motion_stale = True
-        ctx.gate = ACTIVE
+        ctx.gate = GateState.ACTIVE
         ctx.person_seen = True
         ctx.last_person_time = now
         ctx.last_ai_time = 0.0
@@ -380,7 +407,7 @@ class SmartVisionPipeline:
                 try:
                     if focusing:
                         # FOCUS: bỏ qua phát hiện chuyển động hoàn toàn, giữ cổng AI mở
-                        ctx.gate = ACTIVE
+                        ctx.gate = GateState.ACTIVE
                         ctx.motion_boxes, ctx.motion_rejected = [], []
                         ctx.motion_stale = True
                     else:
@@ -407,8 +434,13 @@ class SmartVisionPipeline:
             ctx.last_motion_time = now
         else:
             ctx.motion_streak = 0
-        if ctx.gate == IDLE and ctx.motion_streak >= self.motion_confirm and now >= ctx.refractory_until:
-            ctx.gate = ACTIVE
+        # Dùng GateTransition để thống nhất logic chuyển trạng thái
+        new_gate = GateTransition.try_open(
+            ctx.gate, ctx.motion_streak, self.motion_confirm,
+            refractory_ok=(now >= ctx.refractory_until)
+        )
+        if new_gate != ctx.gate:
+            ctx.gate = new_gate
             ctx.last_person_time = now
             ctx.person_seen = False
             ctx.last_ai_time = 0.0
@@ -422,9 +454,9 @@ class SmartVisionPipeline:
         if fc.active:
             if fc.state != FocusState.LOST:                    # ACQUIRE/TRACK: nhịp quét do focus quyết định
                 return now - ctx.last_ai_time >= fc.scan_interval()
-            if ctx.gate != ACTIVE:                             # LOST + cổng đóng: quét thăm dò thưa để tìm lại mục tiêu
+            if ctx.gate != GateState.ACTIVE:                   # LOST + cổng đóng: quét thăm dò thưa để tìm lại mục tiêu
                 return now - ctx.last_ai_time >= 1.0 / self.lost_probe_fps
-        if ctx.gate != ACTIVE:
+        if ctx.gate != GateState.ACTIVE:
             return False
         moving = (now - ctx.last_motion_time) <= self.motion_hold
         fps = self.ai_fps if moving else self.idle_ai_fps
@@ -434,7 +466,7 @@ class SmartVisionPipeline:
         if not ctx.person_seen:
             ctx.motion.report_false_alarm()   # chuyển động nhưng không có người -> học là nhiễu
             ctx.refractory_until = now + 0.5
-        ctx.gate = IDLE
+        ctx.gate = GateTransition.close(ctx.gate)
         ctx.motion_streak = 0
         ctx.tracker.reset()
         ctx.tracks_view = []
@@ -466,50 +498,77 @@ class SmartVisionPipeline:
 
     def _run_ai(self, ctx: SourceContext, frame: np.ndarray, roi=None, ts: float | None = None) -> None:
         ts = ts if ts is not None else time.perf_counter()
-        fc = ctx.focus
-        if fc.active and fc.mode == MODE_ECO and fc.state == FocusState.TRACK:
-            self._run_focus_eco(ctx, frame, ts)
+        now = ts
+
+        # Xây dựng AppState → lấy AIRunMode → gọi engine.run_for_state()
+        app_state = ctx.build_app_state(now, self.motion_hold)
+        mode = AIRunMode.from_state(app_state)
+        log.debug("[%s] %s", ctx.name, describe_state(app_state))
+
+        result = self.engine.run_for_state(
+            mode=mode,
+            frame=frame,
+            tracker=ctx.tracker,
+            focus=ctx.focus,
+            face_cfg=self.face_cfg,
+            ts=ts,
+            need_face_fn=self._need_face,
+            need_face_focus_fn=self._need_face_focus,
+        )
+
+        if result["skipped"]:
+            return
+
+        tracks: list[Track] = result["tracks"]
+        ctx.ai_ms = result["ai_ms"]
+
+        if mode == AIRunMode.FOCUS_ECO:
+            self._post_focus_eco(ctx, frame, result, now)
+        elif mode == AIRunMode.PROBE:
+            self._post_probe(ctx, result, now)
         else:
-            self._run_normal_ai(ctx, frame, ts)
+            self._post_normal(ctx, frame, result, now)
 
-    # ------------------------------------------------------------------ eco: dùng YOLO 320 quét toàn khung
-    def _run_focus_eco(self, ctx: SourceContext, frame: np.ndarray, ts: float) -> None:
-        """Focus eco: detect người bằng model YOLO nhỏ (yolo_roi_path, 320px) trên TOÀN KHUNG.
-        Không ByteTrack. Không vẽ khung (tracks_view = [] -> UI không vẽ box).
-        Tần suất quét mặt giảm so với chế độ bình thường."""
-        t0 = time.perf_counter()
+    # ------------------------------------------------------------------ post-processing sau mỗi mode
+    def _post_focus_eco(self, ctx: SourceContext, frame: np.ndarray, result: dict, now: float) -> None:
+        """Xử lý sau khi engine chạy FOCUS_ECO."""
         fc = ctx.focus
-
-        # Dùng model nhỏ (yolo_roi / 320px) quét toàn khung — nhẹ hơn model 640 chính
-        persons = self.engine.detect_persons_roi_model(frame)
-
-        cands = [Cand(np.asarray(p["box"], dtype=np.float64), float(p["confidence"])) for p in persons]
-        match = fc.observe(cands, frame, ts)                         # ghép đúng mục tiêu, cập nhật Kalman
-        now = time.perf_counter()
         ft = fc.ftrack
+        match = result["focus_match"]
+
         if match is not None and ft is not None:
             ctx.person_seen = True
             ctx.last_person_time = now
-            if self._need_face_focus(ft, now, fc):                   # tần suất quét mặt thấp hơn khi focus
+            if self._need_face_focus(ft, now, fc):
                 ft.last_face_try = now
-                self._apply_face(ctx, ft, self.engine.process_faces(frame, ft.tlbr), frame)
-        # Không đẩy tracks_view: UI eco không vẽ khung người trên màn hình focus
+                faces = self.engine.process_faces(frame, ft.tlbr)
+                self._apply_face(ctx, ft, faces, frame)
+
+        # Eco không đẩy tracks_view: UI eco không vẽ khung người trên màn hình focus
         ctx.tracks_view = []
-        ctx.ai_ms = (time.perf_counter() - t0) * 1000
-        if fc.state == FocusState.LOST:                              # mất mục tiêu -> về trạng thái bình thường
+
+        if fc.state == FocusState.LOST:
             log.info("[%s] Mất mục tiêu focus, quay về chế độ bình thường.", ctx.name)
             self._focus_to_normal(ctx, now)
 
-    # ------------------------------------------------------------------ bình thường (và full / ACQUIRE / LOST)
-    def _run_normal_ai(self, ctx: SourceContext, frame: np.ndarray, ts: float) -> None:
-        t0 = time.perf_counter()
-        now = time.perf_counter()
+    def _post_probe(self, ctx: SourceContext, result: dict, now: float) -> None:
+        """Xử lý sau khi engine chạy PROBE (tìm lại mục tiêu khi LOST)."""
+        fc = ctx.focus
+        match = result["focus_match"]
+        if match is not None:
+            log.info("[%s] Tìm lại mục tiêu focus sau LOST.", ctx.name)
+            ctx.person_seen = True
+            ctx.last_person_time = now
+        # Không cập nhật tracks_view khi probe
 
-        persons = self.engine.detect_persons(frame)
-        dets = np.array([[*p["box"], p["confidence"]] for p in persons], dtype=np.float32).reshape(-1, 5)
-        tracks = ctx.tracker.update(dets)
+    def _post_normal(self, ctx: SourceContext, frame: np.ndarray, result: dict, now: float) -> None:
+        """Xử lý sau khi engine chạy NORMAL hoặc FOCUS_FULL."""
+        tracks: list[Track] = result["tracks"]
+        fc = ctx.focus
 
-        # --- nhận diện mặt: chỉ cho track còn cần, tối đa N mặt / lượt, ưu tiên track lâu chưa thử
+        # Áp dụng nhận diện mặt (engine đã gọi process_faces bên trong, ở đây áp kết quả)
+        # Note: engine._run_normal gọi process_faces nhưng không _apply_face vì cần db/bus
+        # Nên ta chạy lại vòng face ở đây (cách thiết kế hiện tại, engine chỉ detect+track)
         fc_face = self.face_cfg
         todo = [t for t in tracks if self._need_face(t, now)]
         todo.sort(key=lambda t: t.last_face_try)
@@ -518,14 +577,10 @@ class SmartVisionPipeline:
             faces = self.engine.process_faces(frame, t.tlbr)
             self._apply_face(ctx, t, faces, frame)
 
-        # --- focus: ghép mục tiêu trong số các track vừa quét (ACQUIRE / TRACK-full / LOST tìm lại)
-        fc = ctx.focus
+        # Focus: cập nhật focus_tid từ kết quả observe đã chạy trong engine
         focus_tid = None
-        if fc.active:
-            cands = [Cand(np.asarray(t.tlbr, dtype=np.float64).copy(), float(t.score), t.track_id, t.identity)
-                     for t in tracks]
-            if fc.observe(cands, frame, ts) is not None and fc.ftrack is not None:
-                focus_tid = fc.ftrack.track_id
+        if fc.active and result["focus_match"] is not None and fc.ftrack is not None:
+            focus_tid = fc.ftrack.track_id
 
         if tracks:
             ctx.person_seen = True
@@ -534,10 +589,9 @@ class SmartVisionPipeline:
 
         ctx.tracks_view = [self._to_view(t, now, focused=(focus_tid is not None and t.track_id == focus_tid))
                            for t in tracks]
-        ctx.ai_ms = (time.perf_counter() - t0) * 1000
 
         focusing = fc.active and fc.state in (FocusState.ACQUIRE, FocusState.TRACK)
-        if ctx.gate == ACTIVE and not focusing and not tracks and now - ctx.last_person_time > self.no_person_timeout:
+        if ctx.gate == GateState.ACTIVE and not focusing and not tracks and now - ctx.last_person_time > self.no_person_timeout:
             self._close_gate(ctx, now)
 
     # ------------------------------------------------------------------ nhận diện

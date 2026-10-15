@@ -5,6 +5,9 @@
     process_faces(frame, person_box) -> [{'embedding', 'abs_box', 'det_score'}]
     largest_face(frame)              -> dùng khi đăng ký người quen
 
+    run_for_state(mode, ctx, frame, ts, ...) -> (tracks, focus_match)
+        Entry-point cao cấp: pipeline truyền AIRunMode, engine tự chọn luồng xử lý.
+
 YOLO chạy bằng OpenVINO native (yolo_native.py); khuôn mặt chạy InsightFace + OpenVINO EP (GPU_FP16).
 Một khoá chung bảo vệ các lệnh suy luận (pipeline + giao diện đăng ký có thể gọi đồng thời).
 
@@ -14,7 +17,9 @@ Model ROI (tuỳ chọn): nếu có `yolo_roi_path` (vd. YOLOv8n export imgsz=32
 from __future__ import annotations
 
 import threading
+import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 try:  # nạp OpenVINO TRƯỚC cv2/onnxruntime để tránh xung đột DLL trên một số máy
     import openvino as ov  # noqa: F401
@@ -24,8 +29,13 @@ except ImportError:  # pragma: no cover
 import numpy as np
 
 from BusinessLayer.Inference.face_recognizer import DEFAULT_DEVICE_TYPE, FaceRecognizer
-from BusinessLayer.Inference.yolo_native import YOLOv8OpenVINO
+from BusinessLayer.Inference.yolo_native import YOLOOpenVINO
+from BusinessLayer.state_machine import AIRunMode, AppState
 from Utils.logger import get_logger
+
+if TYPE_CHECKING:
+    from BusinessLayer.focus import Cand, FocusController
+    from BusinessLayer.Inference.tracker import ByteTracker, Track
 
 log = get_logger("Engine")
 
@@ -78,7 +88,7 @@ class InferenceEngine:
 
     @staticmethod
     def _make_yolo(path: Path, device, imgsz, conf, iou):
-        return YOLOv8OpenVINO(path, device=device, imgsz=imgsz, conf=conf, iou=iou, classes=[0],
+        return YOLOOpenVINO(path, device=device, imgsz=imgsz, conf=conf, iou=iou, classes=[0],
                               cache_dir=str(path.parent / ".ov_cache"), performance_hint="LATENCY")
 
     def _warmup(self) -> None:
@@ -90,7 +100,7 @@ class InferenceEngine:
         except Exception:
             log.exception("Warm-up YOLO lỗi")
 
-    # ------------------------------------------------------------------ API
+    # ------------------------------------------------------------------ API cơ bản
     def set_person_conf(self, conf: float) -> None:
         self.yolo.conf = float(conf)
         if self.yolo_roi is not None:
@@ -153,3 +163,162 @@ class InferenceEngine:
         if not candidates:
             return None
         return max(candidates, key=lambda f: (f["abs_box"][2] - f["abs_box"][0]) * (f["abs_box"][3] - f["abs_box"][1]))
+
+    # ================================================================== Entry-point cao cấp
+    def run_for_state(
+        self,
+        mode: AIRunMode,
+        frame: np.ndarray,
+        tracker: "ByteTracker",
+        focus: "FocusController",
+        face_cfg: dict,
+        ts: float | None = None,
+        need_face_fn=None,
+        need_face_focus_fn=None,
+    ) -> dict:
+        """Chạy AI theo AIRunMode đã được xác định từ AppState.
+
+        Pipeline xây dựng AppState → gọi AIRunMode.from_state() → truyền vào đây.
+        Engine tự chọn hàm nội bộ phù hợp và trả về kết quả thống nhất.
+
+        Args:
+            mode:               AIRunMode từ state_machine.AIRunMode.from_state(app_state)
+            frame:              Khung hình hiện tại (numpy BGR)
+            tracker:            ByteTracker của nguồn
+            focus:              FocusController của nguồn
+            face_cfg:           dict cấu hình mặt (từ cfg.section("face"))
+            ts:                 Timestamp hiện tại (perf_counter); tự lấy nếu None
+            need_face_fn:       Callable(track, now) -> bool  (chế độ bình thường)
+            need_face_focus_fn: Callable(track, now, focus) -> bool  (chế độ focus)
+
+        Returns:
+            dict với các key:
+                persons  : list[dict]   - kết quả detect_persons
+                tracks   : list[Track]  - tracks sau ByteTrack (rỗng nếu eco/probe)
+                focus_match: object|None - kết quả fc.observe() (Cand hoặc None)
+                ai_ms    : float        - thời gian xử lý (ms)
+                skipped  : bool         - True nếu mode == SKIP
+        """
+        ts = ts if ts is not None else time.perf_counter()
+        t0 = time.perf_counter()
+
+        _empty = dict(persons=[], tracks=[], focus_match=None,
+                      ai_ms=0.0, skipped=False)
+
+        if mode == AIRunMode.SKIP:
+            return {**_empty, "skipped": True}
+
+        if mode == AIRunMode.FOCUS_ECO:
+            return self._run_focus_eco(frame, focus, ts, t0, need_face_focus_fn)
+
+        if mode in (AIRunMode.FOCUS_FULL, AIRunMode.NORMAL):
+            return self._run_normal(frame, tracker, focus, face_cfg, ts, t0,
+                                    need_face_fn, need_face_focus_fn,
+                                    is_focus=(mode == AIRunMode.FOCUS_FULL))
+
+        if mode == AIRunMode.PROBE:
+            return self._run_probe(frame, focus, ts, t0)
+
+        log.warning("run_for_state: mode không xác định '%s'", mode)
+        return {**_empty, "skipped": True}
+
+    # ------------------------------------------------------------------ luồng Focus-Eco
+    def _run_focus_eco(
+        self,
+        frame: np.ndarray,
+        focus: "FocusController",
+        ts: float,
+        t0: float,
+        need_face_focus_fn=None,
+    ) -> dict:
+        """Focus eco: detect người bằng model YOLO nhỏ (yolo_roi, 320px) trên TOÀN KHUNG.
+        Không ByteTrack. Không vẽ khung (tracks = [] → UI không vẽ box).
+        Tần suất quét mặt giảm so với chế độ bình thường."""
+        from BusinessLayer.focus import Cand
+
+        persons = self.detect_persons_roi_model(frame)
+        cands = [Cand(np.asarray(p["box"], dtype=np.float64), float(p["confidence"])) for p in persons]
+        match = focus.observe(cands, frame, ts)
+
+        now = time.perf_counter()
+        ft = focus.ftrack
+        if match is not None and ft is not None and need_face_focus_fn is not None:
+            if need_face_focus_fn(ft, now, focus):
+                ft.last_face_try = now
+                self.process_faces(frame, ft.tlbr)  # kết quả xử lý face được áp dụng qua callback pipeline
+
+        return dict(
+            persons=persons,
+            tracks=[],              # eco không dùng ByteTrack → UI không vẽ box người
+            focus_match=match,
+            ai_ms=(time.perf_counter() - t0) * 1000,
+            skipped=False,
+        )
+
+    # ------------------------------------------------------------------ luồng Normal / Focus-Full
+    def _run_normal(
+        self,
+        frame: np.ndarray,
+        tracker: "ByteTracker",
+        focus: "FocusController",
+        face_cfg: dict,
+        ts: float,
+        t0: float,
+        need_face_fn=None,
+        need_face_focus_fn=None,
+        is_focus: bool = False,
+    ) -> dict:
+        """Chế độ bình thường hoặc focus-full: YOLO 640 + ByteTrack + nhận diện mặt đầy đủ."""
+        from BusinessLayer.focus import Cand
+
+        persons = self.detect_persons(frame)
+        dets = np.array([[*p["box"], p["confidence"]] for p in persons], dtype=np.float32).reshape(-1, 5)
+        tracks = tracker.update(dets)
+
+        # --- nhận diện mặt: chỉ cho track còn cần, tối đa N mặt / lượt, ưu tiên track lâu chưa thử
+        now = time.perf_counter()
+        if need_face_fn is not None:
+            todo = [t for t in tracks if need_face_fn(t, now)]
+            todo.sort(key=lambda t: t.last_face_try)
+            for t in todo[: int(face_cfg.get("max_per_run", 2))]:
+                t.last_face_try = now
+                self.process_faces(frame, t.tlbr)
+
+        # --- focus: ghép mục tiêu trong số các track vừa quét (ACQUIRE / TRACK-full / LOST tìm lại)
+        match = None
+        if focus.active:
+            cands = [Cand(np.asarray(t.tlbr, dtype=np.float64).copy(), float(t.score), t.track_id, t.identity)
+                     for t in tracks]
+            match = focus.observe(cands, frame, ts)
+
+        return dict(
+            persons=persons,
+            tracks=tracks,
+            focus_match=match,
+            ai_ms=(time.perf_counter() - t0) * 1000,
+            skipped=False,
+        )
+
+    # ------------------------------------------------------------------ luồng Probe (LOST)
+    def _run_probe(
+        self,
+        frame: np.ndarray,
+        focus: "FocusController",
+        ts: float,
+        t0: float,
+    ) -> dict:
+        """Thăm dò tìm lại mục tiêu khi LOST: chỉ detect nhẹ, không ByteTrack.
+        Kết quả được focus.observe() tiêu thụ để phục hồi TRACK nếu tìm lại được."""
+        from BusinessLayer.focus import Cand
+
+        persons = self.detect_persons_roi_model(frame)
+        cands = [Cand(np.asarray(p["box"], dtype=np.float64), float(p["confidence"])) for p in persons]
+        match = focus.observe(cands, frame, ts)
+
+        return dict(
+            persons=persons,
+            tracks=[],
+            focus_match=match,
+            ai_ms=(time.perf_counter() - t0) * 1000,
+            skipped=False,
+        )
