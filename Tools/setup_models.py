@@ -1,6 +1,6 @@
 from pathlib import Path
-import os
 import shutil
+from dataclasses import dataclass, field
 from ultralytics import YOLO
 from insightface.app import FaceAnalysis
 
@@ -8,6 +8,85 @@ current_file_path = Path(__file__).resolve()
 models_dir = current_file_path.parent.parent / 'Models'
 models_dir.mkdir(parents=True, exist_ok=True)
 
+
+# ===========================================================================
+# DANH SÁCH MODEL CẦN TẢI VÀ XUẤT OPENVINO
+# ---------------------------------------------------------------------------
+# Thêm / bớt / chỉnh sửa các entry dưới đây để kiểm soát quá trình setup.
+#
+# Mỗi entry là một ModelConfig với:
+#   target_filename : tên file .pt sẽ được lưu trong thư mục Models/
+#   candidates      : danh sách tên thử khi tải tự động (thử lần lượt từ trên xuống)
+#   export_sizes    : list[int] – các giá trị imgsz sẽ xuất OpenVINO (ví dụ [640, 320])
+#   export_prefix   : tiền tố tên thư mục OpenVINO (ví dụ "yolov8n" → yolov8n_640_openvino_model)
+#                     Nếu để None, sẽ tự suy từ target_filename (bỏ đuôi .pt)
+#   quantize        : chế độ lượng tử hóa khi xuất ('FP16' | 'INT8' | None)
+#   run_smoke_test  : True → chạy thử inference sau khi tải để kiểm tra model
+# ===========================================================================
+
+@dataclass
+class ModelConfig:
+    target_filename: str                    # Tên file .pt lưu trong Models/
+    candidates: list[str]                   # Tên thay thế khi tải tự động
+    export_sizes: list[int] = field(        # Các imgsz sẽ xuất OpenVINO
+        default_factory=lambda: [640, 320]
+    )
+    export_prefix: str | None = None        # Tiền tố thư mục OpenVINO (None = tự suy)
+    quantize: str | None = 'FP16'           # Chế độ lượng tử hóa ('FP16' | 'INT8' | None)
+    run_smoke_test: bool = True             # Chạy thử inference sau khi tải
+
+
+# ─── CHỈNH SỬA DANH SÁCH NÀY ĐỂ THÊM / BỚT MODEL ───────────────────────────
+YOLO_MODELS: list[ModelConfig] = [
+    ModelConfig(
+        target_filename='yolov8n.pt',
+        candidates=['yolov8n.pt'],
+        export_sizes=[640, 320],
+        export_prefix='yolov8n',
+        quantize='FP16',
+    ),
+    ModelConfig(
+        target_filename='yolov26n.pt',
+        candidates=['yolo26n.pt', 'yolov26n.pt'],
+        export_sizes=[640, 320],
+        export_prefix='yolov26n',
+        quantize='FP16',
+    ),
+    ModelConfig(
+        target_filename='yolov8s.pt',
+        candidates=['yolov8s.pt'],
+        export_sizes=[640, 320],
+        export_prefix='yolov8s',
+        quantize='FP16',
+    ),
+    ModelConfig(
+        target_filename='yolov26s.pt',
+        candidates=['yolo26s.pt', 'yolov26s.pt'],
+        export_sizes=[640, 320],
+        export_prefix='yolov26s',
+        quantize='FP16',
+    ),
+    ModelConfig(
+        target_filename='yolov8m.pt',
+        candidates=['yolov8m.pt'],
+        export_sizes=[640, 320],
+        export_prefix='yolov8m',
+        quantize='FP16',
+    ),
+    ModelConfig(
+        target_filename='yolov8l.pt',
+        candidates=['yolov8l.pt'],
+        export_sizes=[640, 320],
+        export_prefix='yolov8l',
+        quantize='FP16',
+    ),
+]
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# ===========================================================================
+# Các hàm tiện ích
+# ===========================================================================
 
 def get_model_path(target_filename: str, candidate_names: list[str]) -> Path:
     """
@@ -52,32 +131,43 @@ def get_model_path(target_filename: str, candidate_names: list[str]) -> Path:
     )
 
 
-def export_openvino(model_path: Path, model_name: str):
+def export_openvino(model_path: Path, cfg: ModelConfig) -> None:
     """
-    Biên dịch mô hình sang OpenVINO với quantize='FP16' cho 2 phiên bản imgsz: 640 và 320.
+    Biên dịch mô hình sang OpenVINO theo cấu hình ModelConfig:
+      - xuất từng imgsz trong cfg.export_sizes
+      - dùng cfg.quantize làm chế độ lượng tử hóa
+      - lưu vào Models/<prefix>_<imgsz>_openvino_model/
     """
-    print(f"\n-> Đang biên dịch {model_name} sang OpenVINO (FP16) cho Intel Iris Xe iGPU/CPU...")
+    # Xác định tiền tố tên thư mục
+    prefix = cfg.export_prefix or Path(cfg.target_filename).stem
 
-    prefix = model_name if model_name.endswith('n') else f"{model_name}n"
+    q_label = cfg.quantize if cfg.quantize else 'FP32'
+    print(f"\n-> Đang biên dịch '{prefix}' sang OpenVINO ({q_label})...")
 
-    for imgsz in (640, 320):
-        print(f"-> Đang xuất bản {prefix} với imgsz={imgsz}, quantize='FP16'...")
+    for imgsz in cfg.export_sizes:
         target_dir = models_dir / f"{prefix}_{imgsz}_openvino_model"
+        print(f"   Xuất imgsz={imgsz}, quantize='{q_label}'  →  {target_dir.name}")
 
-        # Khởi tạo instance YOLO riêng biệt cho từng export để đảm bảo cấu hình imgsz độc lập
+        # Khởi tạo instance YOLO riêng biệt cho mỗi lần export
         model = YOLO(str(model_path))
         try:
-            export_result = model.export(
-                format='openvino',
-                imgsz=imgsz,
-                quantize='FP16'
-            )
+            if cfg.quantize:
+                export_result = model.export(
+                    format='openvino',
+                    imgsz=imgsz,
+                    quantize=cfg.quantize,
+                )
+            else:
+                export_result = model.export(
+                    format='openvino',
+                    imgsz=imgsz,
+                )
         except Exception as e:
-            print(f"   [Cảnh báo] quantize='FP16' gặp lỗi ({e}), chuyển sang fallback half=True...")
+            print(f"   [Cảnh báo] Xuất với quantize='{q_label}' gặp lỗi ({e}), thử fallback half=True...")
             export_result = model.export(
                 format='openvino',
                 imgsz=imgsz,
-                half=True
+                half=True,
             )
 
         exported_path = Path(export_result)
@@ -89,41 +179,67 @@ def export_openvino(model_path: Path, model_name: str):
         if exported_dir.resolve() != target_dir.resolve():
             shutil.move(str(exported_dir), str(target_dir))
 
-        print(f"=> [Thành công] Mô hình {prefix} (imgsz={imgsz}) đã được lưu tại: {target_dir}")
+        print(f"   => [Thành công] Lưu tại: {target_dir}")
 
 
-def setup_yolo():
-    print("=== BƯỚC 1: TẢI VÀ KIỂM TRA YOLOv8 ===")
-    path_v8 = get_model_path('yolov8n.pt', ['yolov8n.pt'])
-    modelv8 = YOLO(str(path_v8))
-
-    print("-> Đang chạy thử nghiệm (Inference Test) cho YOLOv8n...")
+def smoke_test(model_path: Path, model_name: str) -> bool:
+    """Chạy thử inference nhanh để kiểm tra model có hoạt động không."""
+    print(f"-> Đang chạy smoke test cho {model_name}...")
     try:
-        results = modelv8.predict(source="https://ultralytics.com/images/bus.jpg", imgsz=640, verbose=False)
-        print("=> [Thành công] Mô hình YOLOv8n gốc hoạt động bình thường!")
+        m = YOLO(str(model_path))
+        m.predict(source="https://ultralytics.com/images/bus.jpg", imgsz=640, verbose=False)
+        print(f"=> [Thành công] {model_name} hoạt động bình thường!")
+        return True
     except Exception as e:
-        print(f"=> [Thất bại] Lỗi khi chạy mô hình YOLOv8n: {e}")
-        return
+        print(f"=> [Thất bại] {model_name} lỗi khi chạy thử: {e}")
+        return False
 
-    print("\n=== BƯỚC 2: TẢI VÀ KIỂM TRA YOLOv26 ===")
-    path_v26 = get_model_path('yolov26n.pt', ['yolo26n.pt', 'yolov26n.pt'])
-    modelv26 = YOLO(str(path_v26))
 
-    print("-> Đang chạy thử nghiệm (Inference Test) cho YOLOv26n...")
-    try:
-        results = modelv26.predict(source="https://ultralytics.com/images/bus.jpg", imgsz=640, verbose=False)
-        print("=> [Thành công] Mô hình YOLOv26n gốc hoạt động bình thường!")
-    except Exception as e:
-        print(f"=> [Thất bại] Lỗi khi chạy mô hình YOLOv26n: {e}")
-        return
+# ===========================================================================
+# Hàm setup chính – chạy theo danh sách YOLO_MODELS
+# ===========================================================================
 
-    print("\n=== BƯỚC 3: CHUYỂN HÓA SANG OPENVINO (quantize='FP16', imgsz=640 & 320) ===")
-    export_openvino(path_v8, "yolov8")
-    export_openvino(path_v26, "yolov26")
+def setup_yolo(models: list[ModelConfig] | None = None) -> None:
+    """
+    Tải và xuất OpenVINO cho từng model trong danh sách.
+    Nếu `models` là None, dùng danh sách mặc định YOLO_MODELS.
+    """
+    model_list = models if models is not None else YOLO_MODELS
+
+    print(f"=== SETUP YOLO: {len(model_list)} model sẽ được xử lý ===\n")
+
+    for idx, cfg in enumerate(model_list, start=1):
+        sep = "=" * 60
+        print(f"\n{sep}")
+        print(f"  [{idx}/{len(model_list)}] MODEL: {cfg.target_filename}")
+        print(f"  Export sizes : {cfg.export_sizes}")
+        print(f"  Quantize     : {cfg.quantize or 'FP32 (không lượng tử hóa)'}")
+        print(sep)
+
+        # Bước 1: Đảm bảo file .pt tồn tại
+        try:
+            model_path = get_model_path(cfg.target_filename, cfg.candidates)
+        except FileNotFoundError as e:
+            print(f"[LỖI] Bỏ qua model này: {e}\n")
+            continue
+
+        # Bước 2: Smoke test (tuỳ chọn)
+        if cfg.run_smoke_test:
+            ok = smoke_test(model_path, cfg.target_filename)
+            if not ok:
+                print("[Cảnh báo] Smoke test thất bại, vẫn tiếp tục xuất OpenVINO...\n")
+
+        # Bước 3: Xuất OpenVINO
+        try:
+            export_openvino(model_path, cfg)
+        except Exception as e:
+            print(f"[LỖI] Xuất OpenVINO cho '{cfg.target_filename}' thất bại: {e}\n")
+
+    print("\n=== HOÀN THÀNH SETUP YOLO ===")
 
 
 def setup_face_models():
-    print("\n=== BƯỚC 4: TẢI MÔ HÌNH NHẬN DIỆN KHUÔN MẶT ===")
+    print("\n=== TẢI MÔ HÌNH NHẬN DIỆN KHUÔN MẶT ===")
     face_dir = models_dir / 'face_models'
     face_dir.mkdir(parents=True, exist_ok=True)
 
@@ -139,4 +255,5 @@ def setup_face_models():
 
 if __name__ == '__main__':
     setup_yolo()
-    setup_face_models()
+    # setup_face_models()
+

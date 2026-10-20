@@ -1,5 +1,7 @@
 import os
 import time
+from pathlib import Path
+
 import openvino as ov  # noqa: F401  (chỉ để nạp openvino TRƯỚC cv2; KHÔNG tạo ov.Core() ở file này)
 import cv2
 import numpy as np
@@ -13,8 +15,16 @@ CONF = 0.5
 IOU = 0.4
 CLASSES = [0]  # Chỉ detect Person
 
-MODEL_PATH = ["yolov8n_320_openvino_model", "yolov8n_640_openvino_model", "yolov26n_320_openvino_model",
-              "yolov26n_640_openvino_model"]
+MODEL_PATH = ["yolov8n_320_openvino_model" , "yolov8n_640_openvino_model" ,
+              "yolov26n_320_openvino_model", "yolov26n_640_openvino_model",
+              "yolov8s_320_openvino_model" , "yolov8s_640_openvino_model" ,
+              "yolov26s_320_openvino_model", "yolov26s_640_openvino_model",
+              "yolov8m_320_openvino_model" , "yolov8m_640_openvino_model" ,
+              "yolov8l_320_openvino_model" , "yolov8l_640_openvino_model"
+              ]
+_SCRIPT_DIR = Path(__file__).resolve().parent
+MODELS_DIR = (_SCRIPT_DIR / ".." / ".." / "Models").resolve()
+VIDEO_PATH = str(_SCRIPT_DIR / "input.mp4")   # không phụ thuộc thư mục đang chạy
 GPU_DEVICE = "GPU"  # "GPU" cho đồ họa Intel, hoặc "CPU" nếu muốn benchmark Native CPU
 PERFORMANCE_HINT = "LATENCY"  # "LATENCY" | "THROUGHPUT"
 
@@ -28,25 +38,26 @@ def avg_fps_from_times(times):
     return len(times) / sum(times)
 
 
-def build_openvino_model(model_path):
-    image_size = int(model_path.split("_")[1])
+def build_openvino_model(model_name):
+    model_dir = MODELS_DIR / model_name
+    image_size = int(model_name.split("_")[1])    # "yolov8s_640_openvino_model" -> 640
     print(f"Image size: {image_size}")
 
     def make(dev):
         return YOLOOpenVINO(
-            model_path,
+            str(model_dir),                        # <-- đường dẫn đầy đủ
             device=dev,
-            imgsz=image_size,  # chỉ dùng nếu model có shape động
+            imgsz=image_size,
             conf=CONF,
             iou=IOU,
             classes=CLASSES,
             performance_hint=PERFORMANCE_HINT,
-            cache_dir=None,  # không dùng cache kernel để điều kiện benchmark giống nhau
+            cache_dir=None,
         )
 
     try:
         return make(GPU_DEVICE), GPU_DEVICE
-    except Exception as e:  # noqa: BLE001
+    except Exception as e:
         if GPU_DEVICE.upper() == "CPU":
             raise
         print(f"Cảnh báo: Khởi tạo trên {GPU_DEVICE} thất bại ({type(e).__name__}: {e}).")
@@ -113,8 +124,11 @@ def run_native_openvino(model_path):
     print(f"Input model: {yolo.input_layer.shape} | Device: {actual_device}")
 
     cap = cv2.VideoCapture(VIDEO_PATH)
+    if not cap.isOpened():
+        raise RuntimeError(f"Không mở được video: {VIDEO_PATH}")
+
     out_video = cv2.VideoWriter(
-        os.path.join(output_dir, "output_" + model_path + ".mp4"),
+        os.path.join(output_dir, f"output_{Path(model_path).name}.mp4"),
         cv2.VideoWriter_fourcc(*'mp4v'),
         cap.get(cv2.CAP_PROP_FPS),
         (int(cap.get(3)), int(cap.get(4)))
@@ -165,16 +179,15 @@ if __name__ == "__main__":
     # Tạo trước thư mục dataset nếu cần thiết
     print("=== BẮT ĐẦU BENCHMARK SO SÁNH ===")
 
-    for model_dir in MODEL_PATH:
-        if os.path.exists(model_dir):
-            print(f"\n=======================================================")
-            print(f"=== XỬ LÝ MODEL: {model_dir} ===")
-            print(f"=======================================================")
+    for model in MODEL_PATH:
+        if (MODELS_DIR / model).exists():
+            print(f"\n=== XỬ LÝ MODEL: {model} ===")
+            try:
+                fps, dev = run_native_openvino(model)
+            except Exception as e:
+                import traceback
 
-            # 1. Chạy đánh giá độ chuẩn trước
-            # evaluate_accuracy(model_dir)
-
-            # 2. Chạy test tốc độ thực tế (Native OpenVINO)
-            fps_gpu, ov_device = run_native_openvino(model_dir)
+                print(f"LỖI với {model}: {type(e).__name__}: {e}")
+                traceback.print_exc()
         else:
-            print(f"Bỏ qua: Không tìm thấy model '{model_dir}'. Hãy kiểm tra lại.")
+            print(f"Bỏ qua: Không tìm thấy {MODELS_DIR / model}")
