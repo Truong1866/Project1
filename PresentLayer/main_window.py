@@ -134,6 +134,7 @@ class MainWindow(QMainWindow):
             "focus_mode": pipeline.focus_mode,
             "focus_zoom": cfg.get("focus.zoom_margin", 1.8),
             "focus_smooth": cfg.get("focus.smooth_time", 0.25),
+            "notify_video": pipeline.notify_video,
         }
         self.settings = SettingsPanel(defaults, parent=central)
         self.settings.set_people(db.list_people())

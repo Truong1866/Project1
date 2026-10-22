@@ -252,8 +252,16 @@ def setup_face_models():
     except Exception as e:
         print(f"=> [Thất bại] Lỗi khi tải mô hình khuôn mặt: {e}")
 
+    try:
+        # buffalo_s là bộ model nhẹ (Small) rất phù hợp cho CPU/iGPU
+        # Bao gồm cả Detection (tìm mặt) và Recognition (trích xuất vector)
+        app = FaceAnalysis(name="buffalo_m", root=face_dir)
+        app.prepare(ctx_id=0, det_size=(640, 640))
+        print("=> [Thành công] Mô hình khuôn mặt (ONNX) đã tải xong và sẵn sàng dùng!")
+    except Exception as e:
+        print(f"=> [Thất bại] Lỗi khi tải mô hình khuôn mặt: {e}")
 
 if __name__ == '__main__':
-    setup_yolo()
-    # setup_face_models()
+    #setup_yolo()
+    setup_face_models()
 

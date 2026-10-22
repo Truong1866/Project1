@@ -1,10 +1,11 @@
-"""Gửi cảnh báo "có người đến" lên Discord qua webhook.
+"""Gửi cảnh báo "người vào / ra / bị che khuất" lên Discord qua webhook.
 
-  * Lắng nghe EventBus (PERSON_KNOWN / PERSON_UNKNOWN), KHÔNG chặn luồng AI: callback chỉ xếp sự kiện vào hàng đợi.
-  * Một luồng riêng gửi HTTP. Giữa 2 tin tối thiểu `min_interval` giây (mặc định 20s).
+  * Lắng nghe EventBus (NOTIFY_MESSAGE), KHÔNG chặn luồng AI: callback chỉ xếp sự kiện vào hàng đợi.
+  * Một luồng riêng gửi HTTP. Giữa 2 tin tối thiểu `min_interval` giây (mặc định 2s).
   * Chờ bằng Condition.wait(timeout): không sleep, không vòng lặp bận -> 0% CPU khi rảnh,
     và thức dậy ngay khi có sự kiện mới hoặc khi tắt app.
-  * Sự kiện đến trong lúc đang chờ không bị bỏ: được gộp thành 1 tin (mỗi sự kiện 1 dòng) gửi ngay khi hết thời gian chờ.
+  * Startup burst: khi khởi động phát hiện nhiều người, gom thành 1 tin nhắn duy nhất với mỗi dòng là 1 người.
+  * Cấu trúc 1 dòng thông báo: #thời gian + #id + #họ tên (nếu có) + trạng thái (ra/vào/bị che khuất)
 """
 from __future__ import annotations
 
@@ -14,7 +15,8 @@ import time
 import urllib.error
 import urllib.request
 
-from Utils.event_bus import PERSON_KNOWN, PERSON_UNKNOWN, EventBus
+from Utils.event_bus import (NOTIFY_MESSAGE, PERSON_ENTER, PERSON_EXIT,
+                              PERSON_OCCLUDED, EventBus)
 from Utils.logger import get_logger
 
 log = get_logger("Discord")
@@ -22,9 +24,15 @@ log = get_logger("Discord")
 MAX_LINES_PER_MSG = 15      # 15 dòng * ~60 ký tự << giới hạn 2000 ký tự của Discord
 MAX_PENDING = 200           # chặn hàng đợi phình to nếu Discord/mạng lỗi kéo dài
 
+_STATUS_LABEL = {
+    PERSON_ENTER: "vào",
+    PERSON_EXIT: "ra",
+    PERSON_OCCLUDED: "bị che khuất",
+}
+
 
 class DiscordNotifier:
-    def __init__(self, webhooks: list[str], min_interval: float = 20.0, timeout: float = 10.0,
+    def __init__(self, webhooks: list[str], min_interval: float = 2.0, timeout: float = 10.0,
                  username: str = "Smart Vision"):
         self.webhooks = list(webhooks)
         self.min_interval = max(0.0, float(min_interval))
@@ -32,7 +40,7 @@ class DiscordNotifier:
         self.username = username
 
         self._cv = threading.Condition()
-        self._pending: list[tuple[float, str, str | None]] = []   # (ts, topic, tên)
+        self._pending: list[str] = []                             # danh sách chuỗi tin nhắn đang chờ gửi
         self._next_allowed = 0.0                                  # mốc time.monotonic()
         self._stopped = False
         self._thread = threading.Thread(target=self._run, name="DiscordNotifier", daemon=True)
@@ -57,15 +65,14 @@ class DiscordNotifier:
         if not dc.get("enabled", True) or not valid:
             log.info("Discord: tắt hoặc chưa có discord.web_hooks -> không gửi cảnh báo.")
             return None
-        notifier = cls(valid, min_interval=float(dc.get("min_interval_sec", 20)))
+        notifier = cls(valid, min_interval=float(dc.get("min_interval_sec", 2.0)))
         notifier.attach(bus)
         notifier.start()
-        log.info("Discord: bật cảnh báo (%d webhook, cách nhau >= %.0fs).", len(valid), notifier.min_interval)
+        log.info("Discord: bật cảnh báo (%d webhook, cách nhau >= %.1fs).", len(valid), notifier.min_interval)
         return notifier
 
     def attach(self, bus: EventBus) -> None:
-        bus.subscribe(PERSON_KNOWN, self.on_event)
-        bus.subscribe(PERSON_UNKNOWN, self.on_event)
+        bus.subscribe(NOTIFY_MESSAGE, self.on_message)
 
     def start(self) -> None:
         self._thread.start()
@@ -77,10 +84,30 @@ class DiscordNotifier:
         if self._thread.is_alive():
             self._thread.join(timeout=2.0)
 
-    # ------------------------------------------------------------------ nhận sự kiện (chạy ở luồng AI, phải nhanh)
-    def on_event(self, ev: dict) -> None:
+    # ------------------------------------------------------------------ nhận tin nhắn
+    def on_message(self, ev: dict) -> None:
+        text = str(ev.get("text", "")).strip()
+        if not text:
+            return
         with self._cv:
-            self._pending.append((float(ev.get("ts", time.time())), ev.get("topic", ""), ev.get("name")))
+            self._pending.append(text)
+            if len(self._pending) > MAX_PENDING:
+                del self._pending[0]
+            self._cv.notify()
+
+    def on_event(self, ev: dict) -> None:
+        """Hỗ trợ nhận event trực tiếp (backward compatibility)."""
+        topic = ev.get("topic")
+        if topic == NOTIFY_MESSAGE:
+            self.on_message(ev)
+            return
+        ts = float(ev.get("ts", time.time()))
+        track_id = ev.get("track_id")
+        name = ev.get("name")
+        status = ev.get("status") or _STATUS_LABEL.get(topic, "vào")
+        line = self._format(ts, topic, track_id, name, status)
+        with self._cv:
+            self._pending.append(line)
             if len(self._pending) > MAX_PENDING:
                 del self._pending[0]
             self._cv.notify()
@@ -102,17 +129,24 @@ class DiscordNotifier:
                 batch = self._pending[:MAX_LINES_PER_MSG]
                 del self._pending[:len(batch)]
 
-            retry_after = self._send("\n".join(self._format(*b) for b in batch))
+            content = "\n".join(batch)
+            retry_after = self._send(content)
 
             with self._cv:
                 self._next_allowed = time.monotonic() + max(self.min_interval, retry_after)
 
     @staticmethod
-    def _format(ts: float, topic: str, name: str | None) -> str:
-        when = time.strftime("%H:%M:%S %d/%m/%Y", time.localtime(ts))
-        if topic == PERSON_KNOWN and name:
-            return f"🟢 **{name}** — {when}"
-        return f"🔴 **Người lạ** — {when}"
+    def _format(ts: float, topic: str, track_id: int | None, name: str | None, status: str | None = None) -> str:
+        """Định dạng 1 dòng: #HH:MM:SS #<track_id> #<tên nếu có> <trạng thái>"""
+        when = time.strftime("%H:%M:%S", time.localtime(ts))
+        st = status or _STATUS_LABEL.get(topic, topic)
+        parts = [f"#{when}"]
+        if track_id is not None:
+            parts.append(f"#{track_id}")
+        if name and name.strip() and name.strip() != "Unknown":
+            parts.append(f"#{name.strip()}")
+        parts.append(st)
+        return " ".join(parts)
 
     # ------------------------------------------------------------------ HTTP
     def _send(self, content: str) -> float:

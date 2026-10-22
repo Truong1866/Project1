@@ -14,6 +14,12 @@ PERSON_KNOWN = "person_known"      # nhận ra người quen
 PERSON_UNKNOWN = "person_unknown"  # phát hiện người lạ
 ALL = "*"
 
+# Chủ đề theo vòng đời track (presence tracking)
+PERSON_ENTER = "person_enter"      # người mới vào khung hình (track_id mới xuất hiện)
+PERSON_EXIT = "person_exit"        # người rời khung hình (track_id biến mất hẳn ra ngoài)
+PERSON_OCCLUDED = "person_occluded"  # người bị che khuất (track mất nhưng ước tính vẫn còn trong frame)
+NOTIFY_MESSAGE = "notify_message"  # tin nhắn thông báo hoàn chỉnh (gửi lên Discord)
+
 
 class EventBus:
     def __init__(self):

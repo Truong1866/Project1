@@ -6,10 +6,23 @@ import time
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QAbstractItemView, QHeaderView, QLabel, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget
 
-from Utils.event_bus import PERSON_KNOWN, PERSON_UNKNOWN
+from Utils.event_bus import (PERSON_ENTER, PERSON_EXIT, PERSON_KNOWN,
+                              PERSON_OCCLUDED, PERSON_UNKNOWN)
 
-_TEXT = {PERSON_KNOWN: "Người quen", PERSON_UNKNOWN: "Người lạ"}
-_COLOR = {PERSON_KNOWN: QColor("#4ade80"), PERSON_UNKNOWN: QColor("#f87171")}
+_TEXT = {
+    PERSON_KNOWN: "Người quen",
+    PERSON_UNKNOWN: "Người lạ",
+    PERSON_ENTER: "Vào",
+    PERSON_EXIT: "Ra",
+    PERSON_OCCLUDED: "Bị che khuất",
+}
+_COLOR = {
+    PERSON_KNOWN: QColor("#4ade80"),
+    PERSON_UNKNOWN: QColor("#f87171"),
+    PERSON_ENTER: QColor("#38bdf8"),
+    PERSON_EXIT: QColor("#f59e0b"),
+    PERSON_OCCLUDED: QColor("#c084fc"),
+}
 
 
 class EventList(QWidget):
@@ -36,9 +49,20 @@ class EventList(QWidget):
 
     def add_event(self, ev: dict) -> None:
         topic = ev.get("topic")
+        if topic not in _TEXT:
+            return
+        tid = ev.get("track_id")
+        tid_str = f"#{tid}" if tid is not None else ""
+        name = ev.get("name")
+        if name:
+            person_str = f"{tid_str} {name}".strip()
+        elif tid_str:
+            person_str = tid_str
+        else:
+            person_str = "-"
         row = [time.strftime("%H:%M:%S", time.localtime(ev.get("ts", time.time()))),
                ev.get("source_name", ""), _TEXT.get(topic, topic),
-               ev.get("name") if topic == PERSON_KNOWN else "-"]
+               person_str]
         self.table.insertRow(0)
         for col, text in enumerate(row):
             item = QTableWidgetItem(str(text))

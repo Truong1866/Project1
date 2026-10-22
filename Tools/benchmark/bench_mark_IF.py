@@ -45,7 +45,7 @@ from BusinessLayer.Inference.face_recognizer import FaceRecognizer  # noqa: E402
 # BIẾN GLOBAL CẦN CHỈNH
 # ======================================================================================
 YOLO_MODEL = "yolov8n_640_openvino_model"      # tên thư mục trong Models/ (YOLO chạy để lấy box người)
-FACE_MODELS = ["buffalo_s", "buffalo_m"]       # tên các model InsightFace cần test (thư mục trong Models/face_models/models/)
+FACE_MODELS = ["buffalo_s", "buffalo_m", "hyprid"]       # tên các model InsightFace cần test (thư mục trong Models/face_models/models/)
 
 # ---- đường dẫn
 MODELS_DIR = ROOT / "Models"

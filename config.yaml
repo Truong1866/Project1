@@ -97,5 +97,6 @@ ui:
 # ---------- Discord ----------
 discord:
   enabled: true
-  min_interval_sec: 20     # khoảng cách tối thiểu giữa 2 tin nhắn
+  min_interval_sec: 2      # khoảng cách tối thiểu giữa 2 tin nhắn
+  notify_video: false      # bật thì xử lý như lấy từ camera, tắt thì bỏ qua khối xử lý thông báo với video
   web_hooks: []            # khai báo thật trong config.local.yaml
