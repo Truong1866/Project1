@@ -1,3 +1,15 @@
+"""[ĐÃ LỖI THỜI] CameraStream — chức năng đã được chuyển sang InputManager.
+
+Lớp CameraStream ban đầu đọc camera bằng cv2.VideoCapture và phát hiện
+chuyển động đơn giản. Toàn bộ chức năng đó đã được thay thế bởi:
+  - BusinessLayer/input_manager.py  (InputManager + đọc luồng)
+  - BusinessLayer/motion_detector.py (MotionDetector có lọc nhiễu nâng cao)
+
+File này được giữ lại để không làm hỏng bất kỳ import bên ngoài nào,
+nhưng KHÔNG NÊN dùng CameraStream trong code mới.
+"""
+import warnings
+
 import cv2
 import threading
 import time
@@ -5,7 +17,14 @@ import numpy as np
 
 
 class CameraStream:
+    """[Deprecated] Dùng InputManager + MotionDetector thay thế."""
+
     def __init__(self, camera_id, source, motion_threshold=1000):
+        warnings.warn(
+            "CameraStream đã lỗi thời. Hãy dùng InputManager và MotionDetector thay thế.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self.camera_id = camera_id
         self.source = source
         self.motion_threshold = motion_threshold

@@ -11,24 +11,18 @@ Quy trình đăng ký nhiều góc nhìn:
   - Nhấn 'q' để lưu sớm (nếu đã có ít nhất 1 mẫu) hoặc thoát
 """
 
-import sys
 from pathlib import Path
-
-# ── Thêm thư mục benchmark vào sys.path để import yolo_native trực tiếp ───────
-_BENCHMARK_DIR = Path(__file__).resolve().parent / "benchmark"
-if str(_BENCHMARK_DIR) not in sys.path:
-    sys.path.insert(0, str(_BENCHMARK_DIR))
 
 import cv2
 import numpy as np
 
-# Import YOLOOpenVINO từ benchmark/yolo_native.py (không qua ultralytics/torch)
+# Import YOLOOpenVINO từ BusinessLayer/Inference/yolo_native.py (nguồn chuẩn dùng chung toàn dự án)
 try:
     import openvino as ov  # noqa: F401  # nạp OpenVINO TRƯỚC cv2 / onnxruntime
 except ImportError:
     pass
 
-from benchmark.yolo_native import YOLOOpenVINO  # benchmark/yolo_native.py
+from BusinessLayer.Inference.yolo_native import YOLOOpenVINO
 
 from BusinessLayer.Inference.face_recognizer import FaceRecognizer
 from DataLayer.vector_db import FaceDatabase
@@ -130,13 +124,6 @@ def _cosine_sim(a: np.ndarray, b: np.ndarray) -> float:
     a = a / (np.linalg.norm(a) + 1e-9)
     b = b / (np.linalg.norm(b) + 1e-9)
     return float(np.dot(a, b))
-
-
-def _average_embedding(embeddings: list[np.ndarray]) -> np.ndarray:
-    """Tính trung bình rồi chuẩn hóa L2 → unit vector."""
-    mean_vec = np.mean(np.stack(embeddings, axis=0), axis=0)
-    norm = np.linalg.norm(mean_vec)
-    return (mean_vec / (norm + 1e-9)).astype(np.float32)
 
 
 def _draw_overlay(frame: np.ndarray, collected: int, total: int, hint: str) -> np.ndarray:
@@ -281,13 +268,13 @@ def register():
                 f"(det_score={face_results[0]['det_score']:.2f}, góc: {hint})"
             )
 
-            # 5. Tự động lưu khi đủ NUM_SAMPLES
+            # 5. Tự động lưu khi đủ NUM_SAMPLES (lưu từng mẫu riêng để cải thiện nhận diện góc nghiêng)
             if len(embeddings) >= NUM_SAMPLES:
-                avg_vec = _average_embedding(embeddings)
-                db.add_person(name, avg_vec)
+                for emb_i in embeddings:
+                    db.add_person(name, emb_i)
                 print(
-                    f"\n==> Đăng ký thành công '{name}' với vector trung bình "
-                    f"từ {len(embeddings)} góc nhìn! Nhấn 'q' để thoát."
+                    f"\n==> Đăng ký thành công '{name}' với {len(embeddings)} mẫu góc nhìn riêng biệt!"
+                    f"\n    (Tổng mẫu trong DB: {len(db.known_faces.get(name, []))}). Nhấn 'q' để thoát."
                 )
                 embeddings.clear()  # reset nếu muốn chụp thêm người khác
 
@@ -303,11 +290,11 @@ def register():
         # ── Phím 'q': lưu sớm & thoát ───────────────────────────────────────
         elif key == ord('q'):
             if embeddings:
-                avg_vec = _average_embedding(embeddings)
-                db.add_person(name, avg_vec)
+                for emb_i in embeddings:
+                    db.add_person(name, emb_i)
                 print(
-                    f"\n==> Đã lưu '{name}' với vector trung bình "
-                    f"từ {len(embeddings)} mẫu (lưu sớm)."
+                    f"\n==> Đã lưu '{name}' với {len(embeddings)} mẫu riêng biệt (lưu sớm)."
+                    f"\n    (Tổng mẫu trong DB: {len(db.known_faces.get(name, []))})"
                 )
             else:
                 print("\n[!] Chưa có mẫu nào, thoát mà không lưu.")

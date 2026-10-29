@@ -31,6 +31,7 @@ from BusinessLayer.focus import MODE_ECO, MODE_FULL, Cand, FocusController, Focu
 from BusinessLayer.Inference.tracker import ByteTracker, Track
 from BusinessLayer.input_manager import InputManager, SourceKind, classify_source
 from BusinessLayer.motion_detector import MotionDetector
+from BusinessLayer.state_machine import GateState
 from DataLayer.vector_db import UNKNOWN, FaceDatabase
 from Utils.config import Config
 from Utils.event_bus import (NOTIFY_MESSAGE, PERSON_ENTER, PERSON_EXIT,
@@ -40,7 +41,9 @@ from Utils.logger import get_logger
 
 log = get_logger("Pipeline")
 
-IDLE, ACTIVE = "idle", "active"
+# Aliases để giữ tính tương thích ngược (GateState là str-enum nên so sánh == vẫn đúng)
+IDLE = GateState.IDLE
+ACTIVE = GateState.ACTIVE
 
 
 @dataclass
@@ -624,7 +627,7 @@ class SmartVisionPipeline:
         if match is not None and ft is not None:
             ctx.person_seen = True
             ctx.last_person_time = now
-            if self._need_face(ft, now):                             # nhận diện mặt chỉ cho mục tiêu (nếu chưa biết là ai)
+            if self._need_face_focus(ft, now):                       # nhận diện mặt chỉ cho mục tiêu (nếu chưa biết là ai)
                 ft.last_face_try = now
                 self._apply_face(ctx, ft, self.engine.process_faces(frame, ft.tlbr), frame)
             ctx.tracks_view = [self._to_view(ft, now, focused=True)]
@@ -725,6 +728,17 @@ class SmartVisionPipeline:
         if t.identity not in (None, UNKNOWN):
             return False  # đã chốt là người quen
         gap = fc.get("interval_pending", 0.3) if t.identity is None else fc.get("interval_unknown", 1.5)
+        return now - t.last_face_try >= gap
+
+    def _need_face_focus(self, t: Track, now: float) -> bool:
+        """Như _need_face nhưng dùng tần suất thấp hơn khi đang ở chế độ focus (tiết kiệm tài nguyên)."""
+        if t.identity not in (None, UNKNOWN):
+            return False  # đã chốt là người quen
+        fc_focus = self.focus_cfg
+        if t.identity is None:
+            gap = float(fc_focus.get("face_interval_pending_focus", self.face_cfg.get("interval_pending", 0.3)))
+        else:
+            gap = float(fc_focus.get("face_interval_unknown_focus", self.face_cfg.get("interval_unknown", 1.5)))
         return now - t.last_face_try >= gap
 
     def _apply_face(self, ctx: SourceContext, t: Track, faces: list, frame: np.ndarray) -> None:

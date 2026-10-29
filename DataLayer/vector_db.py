@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import json
 import os
-import pickle
 import threading
 from pathlib import Path
 
@@ -11,7 +11,7 @@ from Utils.logger import get_logger
 
 log = get_logger("FaceDB")
 
-DEFAULT_DB_PATH = Path(__file__).resolve().parent / "known_faces.pkl"
+DEFAULT_DB_PATH = Path(__file__).resolve().parent / "known_faces.json"
 UNKNOWN = "Unknown"
 
 
@@ -26,6 +26,9 @@ class FaceDatabase:
 
     def __init__(self, db_path: str | Path = DEFAULT_DB_PATH, threshold: float = 0.45):
         self.db_path = Path(db_path)
+        # Đảm bảo db_path kết thúc bằng .json (hỗ trợ truyền vào .pkl cũ)
+        if self.db_path.suffix == ".pkl":
+            self.db_path = self.db_path.with_suffix(".json")
         self.threshold = threshold
         self._lock = threading.RLock()
         self.known_faces: dict[str, list[np.ndarray]] = {}
@@ -35,29 +38,81 @@ class FaceDatabase:
         self._load_db()
 
     # ------------------------------------------------------------------ lưu / tải
+    def _npz_path(self) -> Path:
+        return self.db_path.with_suffix(".npz")
+
     def _load_db(self) -> None:
-        if self.db_path.exists():
+        json_path = self.db_path
+        npz_path = self._npz_path()
+
+        # --- Nạp từ định dạng mới (JSON + NPZ) ---
+        if json_path.exists() and npz_path.exists():
             try:
-                with open(self.db_path, "rb") as f:
-                    raw = pickle.load(f)
+                meta = json.loads(json_path.read_text(encoding="utf-8"))
+                npz = np.load(str(npz_path))
+                for i, name in enumerate(meta.get("names", [])):
+                    key = f"s{i}"
+                    if key in npz:
+                        arr = npz[key].astype(np.float32)
+                        samples = [arr[j] for j in range(arr.shape[0])] if arr.ndim == 2 else [arr]
+                        self.known_faces[name] = [_normalize(s) for s in samples][-self.MAX_SAMPLES:]
+                log.info("Đã tải %d người quen từ CSDL (JSON+NPZ).", len(self.known_faces))
+                self._rebuild()
+                return
+            except Exception:
+                log.exception("Không đọc được %s + %s, thử tải từ pickle...", json_path, npz_path)
+                self.known_faces.clear()
+
+        # --- Tương thích ngược: tải từ pickle rồi chuyển sang định dạng mới ---
+        pkl_path = self.db_path.with_suffix(".pkl")
+        if pkl_path.exists():
+            try:
+                import pickle  # noqa: PLC0415
+                with open(pkl_path, "rb") as f:
+                    raw = pickle.load(f)  # noqa: S301 — chỉ dùng để di chuyển dữ liệu cũ
                 for name, value in raw.items():
                     arr = np.asarray(value, dtype=np.float32)
                     samples = [arr] if arr.ndim == 1 else list(arr)
                     self.known_faces[name] = [_normalize(s) for s in samples][-self.MAX_SAMPLES:]
-                log.info("Đã tải %d người quen từ CSDL.", len(self.known_faces))
+                log.info(
+                    "Đã tải %d người quen từ pickle cũ. Đang chuyển sang JSON+NPZ...",
+                    len(self.known_faces),
+                )
+                self._rebuild()
+                self.save_db()  # lưu ngay sang định dạng mới
+                log.info(
+                    "Chuyển đổi xong. File pickle gốc được giữ lại tại '%s' (có thể xoá thủ công).",
+                    pkl_path,
+                )
+                return
             except Exception:
-                log.exception("Không đọc được %s, bắt đầu với CSDL trống", self.db_path)
+                log.exception("Không đọc được pickle '%s', bắt đầu với CSDL trống", pkl_path)
+                self.known_faces.clear()
         else:
             log.info("CSDL khuôn mặt trống. Hãy đăng ký người quen!")
+
         self._rebuild()
 
     def save_db(self) -> None:
         with self._lock:
             os.makedirs(self.db_path.parent, exist_ok=True)
-            tmp = self.db_path.with_suffix(".tmp")
-            with open(tmp, "wb") as f:
-                pickle.dump(self.known_faces, f)
-            os.replace(tmp, self.db_path)  # ghi nguyên tử, không hỏng file nếu tắt đột ngột
+            names = list(self.known_faces.keys())
+            counts = [len(self.known_faces[n]) for n in names]
+            meta = {"names": names, "counts": counts}
+
+            # Ghi JSON (index)
+            tmp_json = self.db_path.with_suffix(".json.tmp")
+            tmp_json.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+            os.replace(tmp_json, self.db_path)
+
+            # Ghi NPZ (embeddings)
+            npz_data = {}
+            for i, name in enumerate(names):
+                samples = self.known_faces[name]
+                npz_data[f"s{i}"] = np.stack(samples, axis=0) if samples else np.zeros((0, 512), np.float32)
+            tmp_npz = self._npz_path().with_suffix(".npz.tmp")
+            np.savez(str(tmp_npz), **npz_data)
+            os.replace(tmp_npz, self._npz_path())
 
     def _rebuild(self) -> None:
         names, owners, rows = [], [], []
