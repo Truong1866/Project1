@@ -52,34 +52,21 @@ YOLO_MODELS: list[ModelConfig] = [
         export_prefix='yolov26n',
         quantize='FP16',
     ),
-    ModelConfig(
-        target_filename='yolov8s.pt',
-        candidates=['yolov8s.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov8s',
-        quantize='FP16',
-    ),
-    ModelConfig(
-        target_filename='yolov26s.pt',
-        candidates=['yolo26s.pt', 'yolov26s.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov26s',
-        quantize='FP16',
-    ),
-    ModelConfig(
-        target_filename='yolov8m.pt',
-        candidates=['yolov8m.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov8m',
-        quantize='FP16',
-    ),
-    ModelConfig(
-        target_filename='yolov8l.pt',
-        candidates=['yolov8l.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov8l',
-        quantize='FP16',
-    ),
+    # ── Thêm model mới vào đây ──────────────────────────────────────────────
+    # ModelConfig(
+    #     target_filename='yolov9c.pt',
+    #     candidates=['yolov9c.pt'],
+    #     export_sizes=[640],
+    #     export_prefix='yolov9c',
+    #     quantize='FP16',
+    # ),
+    # ModelConfig(
+    #     target_filename='yolo11n.pt',
+    #     candidates=['yolo11n.pt'],
+    #     export_sizes=[640, 320],
+    #     export_prefix='yolo11n',
+    #     quantize='INT8',
+    # ),
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 

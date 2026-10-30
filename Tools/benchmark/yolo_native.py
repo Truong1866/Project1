@@ -20,6 +20,9 @@ Ví dụ:
     python yolov8_openvino.py --model yolov8n.onnx --source video.mp4 --device AUTO --show
     python yolov8_openvino.py --model yolov8n.onnx --source 0 --device GPU --show     # webcam
 """
+# ⚠️  LƯ U Ý: File này là bản sao độc lập dành riêng cho benchmark/Tools.
+# Code ứng dụng chính nên dùng BusinessLayer/Inference/yolo_native.py.
+# Hai file phải được giữ đồng bộ nếu có thay đổi thuật toán.
 from __future__ import annotations
 
 import argparse

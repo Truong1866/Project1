@@ -137,6 +137,13 @@ class InferenceEngine:
             det = model(np.ascontiguousarray(crop))
         return self._to_persons(det, x1, y1)
 
+    def detect_persons_roi_model(self, frame: np.ndarray) -> list[dict]:
+        """Detect người toàn khung bằng model nhỏ (yolo_roi nếu có) — dùng trong eco/probe."""
+        with self._lock:
+            model = self.yolo_roi if self.yolo_roi is not None else self.yolo
+            det = model(frame)
+        return self._to_persons(det)
+
     def process_faces(self, frame: np.ndarray, person_box) -> list[dict]:
         with self._lock:
             return self.faces.extract(frame, person_box, head_only=True)

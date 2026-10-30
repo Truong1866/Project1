@@ -31,14 +31,19 @@ from BusinessLayer.focus import MODE_ECO, MODE_FULL, Cand, FocusController, Focu
 from BusinessLayer.Inference.tracker import ByteTracker, Track
 from BusinessLayer.input_manager import InputManager, SourceKind, classify_source
 from BusinessLayer.motion_detector import MotionDetector
+from BusinessLayer.state_machine import GateState
 from DataLayer.vector_db import UNKNOWN, FaceDatabase
 from Utils.config import Config
-from Utils.event_bus import PERSON_KNOWN, PERSON_UNKNOWN, EventBus
+from Utils.event_bus import (NOTIFY_MESSAGE, PERSON_ENTER, PERSON_EXIT,
+                              PERSON_KNOWN, PERSON_OCCLUDED, PERSON_UNKNOWN,
+                              EventBus)
 from Utils.logger import get_logger
 
 log = get_logger("Pipeline")
 
-IDLE, ACTIVE = "idle", "active"
+# Aliases để giữ tính tương thích ngược (GateState là str-enum nên so sánh == vẫn đúng)
+IDLE = GateState.IDLE
+ACTIVE = GateState.ACTIVE
 
 
 @dataclass
@@ -99,6 +104,12 @@ class SourceContext:
         self.motion_rejected: list = []
         self.ai_ms = 0.0
         self.cooldown: dict = {}
+        # --- Presence tracking: theo dõi vòng đời track để phát sự kiện ENTER/EXIT/OCCLUDED
+        self.known_tracks: dict[int, Track] = {}  # track_id -> Track đối tượng gần nhất
+        self.notified_enter: set[int] = set()     # track_id đã được thông báo "vào" (không thông báo lại)
+        self.startup_burst_done: bool = False     # đã xử lý xong startup burst chưa
+        self.startup_burst_deadline: float = 0.0  # time.perf_counter() khi cửa sổ startup kết thúc
+        self.startup_burst_queue: list[dict] = [] # danh sách gom sự kiện trong đợt khởi động
 
 
 class SmartVisionPipeline:
@@ -129,6 +140,12 @@ class SmartVisionPipeline:
         self.focus_mode = mode if mode in (MODE_ECO, MODE_FULL) else MODE_ECO
         self.lost_probe_fps = max(0.2, float(self.focus_cfg.get("lost_probe_fps", 2)))
         self._focus_sid: str | None = None
+
+        # --- Cấu hình Discord: notify_video quyết định có gửi thông báo cho nguồn file video không
+        dc = cfg.section("discord")
+        self._notify_video: bool = bool(dc.get("notify_video", False))
+        # Cửa sổ startup burst: 2.5 giây kể từ track đầu tiên được detect của mỗi nguồn
+        self._startup_burst_window: float = 2.5
 
         self.engine = None
         self.ai_ready = threading.Event()
@@ -241,8 +258,18 @@ class SmartVisionPipeline:
             tracks=ctx.tracks_view, motion_boxes=ctx.motion_boxes, motion_rejected=ctx.motion_rejected,
             focus_state=fstate, focus_mode=fc.mode, focus_label=flabel, viewport=viewport)
 
+    @property
+    def notify_video(self) -> bool:
+        return self._notify_video
+
+    @notify_video.setter
+    def notify_video(self, value: bool) -> None:
+        self._notify_video = bool(value)
+
     # ================================================================== cài đặt trực tiếp
     def apply_settings(self, **kw) -> None:
+        if "notify_video" in kw:
+            self._notify_video = bool(kw["notify_video"])
         if "ai_fps" in kw:
             self.ai_fps = max(1.0, float(kw["ai_fps"]))
         if "min_area_ratio" in kw:
@@ -266,6 +293,7 @@ class SmartVisionPipeline:
                 if c.focus.active and c.focus.mode != mode:
                     c.focus.set_mode(mode)
                     c.tracker.reset()                 # eco không cập nhật tracker -> bắt đầu lại cho sạch
+                    self._reset_presence_tracking(c)  # reset presence tracking khi tracker reset
                     c.motion_stale = True
                     c.last_ai_time = 0.0
         if "focus_zoom" in kw:
@@ -357,6 +385,8 @@ class SmartVisionPipeline:
         ctx.person_seen = True
         ctx.last_person_time = now
         ctx.last_ai_time = 0.0
+        # Khi tracker reset (ra khỏi focus), xoá trạng thái presence để phiên mới bắt đầu sạch
+        self._reset_presence_tracking(ctx)
 
     # ================================================================== luồng chuyển động
     def _motion_loop(self) -> None:
@@ -428,10 +458,126 @@ class SmartVisionPipeline:
         if not ctx.person_seen:
             ctx.motion.report_false_alarm()   # chuyển động nhưng không có người -> học là nhiễu
             ctx.refractory_until = now + 0.5
+
+        # Nếu còn startup burst queue chưa flush mà gate đóng -> flush luôn
+        if ctx.startup_burst_queue:
+            self._flush_startup_burst(ctx)
+
+        # Xử lý các track còn lại đang theo dõi khi đóng cổng
+        fid = ctx.tracker.frame_id
+        _, frame = ctx.input.get_frame()
+        frame_shape = frame.shape if frame is not None else (1080, 1920, 3)
+        for tid, t in list(ctx.known_tracks.items()):
+            if tid in ctx.notified_enter:
+                status = self._check_exit_or_occluded(t, frame_shape, fid)
+                name = t.identity if (t.identity and t.identity != UNKNOWN) else None
+                self._notify_presence(ctx, tid, name, status)
+
         ctx.gate = IDLE
         ctx.motion_streak = 0
         ctx.tracker.reset()
         ctx.tracks_view = []
+        self._reset_presence_tracking(ctx)
+
+    # ------------------------------------------------------------------ presence tracking helpers
+    def _reset_presence_tracking(self, ctx: SourceContext) -> None:
+        """Xoá trạng thái presence khi tracker reset (đóng cổng hoặc chuyển về bình thường)."""
+        ctx.known_tracks.clear()
+        ctx.notified_enter.clear()
+        ctx.startup_burst_done = False
+        ctx.startup_burst_deadline = 0.0
+        ctx.startup_burst_queue.clear()
+
+    @staticmethod
+    def format_notify_line(ts: float, track_id: int | str, name: str | None, status: str) -> str:
+        """Cấu trúc 1 dòng thông báo: #thời gian + #id + #họ tên (nếu có) + trạng thái (ra/vào/bị che khuất)"""
+        when = time.strftime("%H:%M:%S", time.localtime(ts))
+        parts = [f"#{when}", f"#{track_id}"]
+        if name and name.strip() and name.strip() != UNKNOWN and name.strip() != "Unknown":
+            parts.append(f"#{name.strip()}")
+        parts.append(status)
+        return " ".join(parts)
+
+    @staticmethod
+    def _check_exit_or_occluded(track: "Track", frame_shape: tuple, current_fid: int) -> str:
+        """Nếu có 1 người vị trí box trước đó vẫn còn trong khung hình, tính theo tốc độ
+        cuối cùng của người đó đạt được xem đã vượt ra khỏi khung chưa.
+        Nếu đã ra thì thông báo là ra, ngược lại thì tính là che khuất.
+        """
+        h_frame, w_frame = frame_shape[:2]
+        box = getattr(track, "last_seen_tlbr", track.tlbr)
+        x1, y1, x2, y2 = float(box[0]), float(box[1]), float(box[2]), float(box[3])
+        margin = 15.0
+
+        vx = float(getattr(track, "last_seen_vx", 0.0))
+        vy = float(getattr(track, "last_seen_vy", 0.0))
+        if vx == 0.0 and vy == 0.0 and track.mean is not None:
+            vx = float(track.mean[4])
+            vy = float(track.mean[5])
+
+        # 1. Nếu vị trí box trước đó đã sát mép hoặc ngoài khung hình theo hướng di chuyển -> "ra"
+        touch_left = (x1 <= margin and vx <= 1.0)
+        touch_right = (x2 >= w_frame - margin and vx >= -1.0)
+        touch_top = (y1 <= margin and vy <= 1.0)
+        touch_bottom = (y2 >= h_frame - margin and vy >= -1.0)
+        if touch_left or touch_right or touch_top or touch_bottom:
+            return "ra"
+
+        # 2. Vị trí box trước đó vẫn còn trong khung hình:
+        # Tính theo tốc độ cuối cùng đạt được xem đã vượt ra khỏi khung chưa.
+        last_fid = getattr(track, "last_seen_frame_id", track.frame_id)
+        dt_frames = max(1, current_fid - last_fid)
+
+        pred_x1 = x1 + vx * dt_frames
+        pred_y1 = y1 + vy * dt_frames
+        pred_x2 = x2 + vx * dt_frames
+        pred_y2 = y2 + vy * dt_frames
+
+        pred_cx = (pred_x1 + pred_x2) / 2.0
+        pred_cy = (pred_y1 + pred_y2) / 2.0
+
+        exited = (pred_x2 <= margin or pred_x1 >= w_frame - margin or
+                  pred_y2 <= margin or pred_y1 >= h_frame - margin or
+                  pred_cx <= 0 or pred_cx >= w_frame or
+                  pred_cy <= 0 or pred_cy >= h_frame)
+
+        if exited:
+            return "ra"
+        return "bị che khuất"
+
+    def _notify_presence(self, ctx: SourceContext, track_id: int, name: str | None, status: str, ts: float | None = None) -> None:
+        """Phát sự kiện và thông báo cho 1 người với trạng thái (vào / ra / bị che khuất)."""
+        if ctx.kind == SourceKind.FILE and not self._notify_video:
+            return
+        ts = ts or time.time()
+        line = self.format_notify_line(ts, track_id, name, status)
+        topic = PERSON_ENTER if status == "vào" else (PERSON_EXIT if status == "ra" else PERSON_OCCLUDED)
+        self.bus.publish(topic, source_id=ctx.id, source_name=ctx.name,
+                         track_id=track_id, name=name, ts=ts, status=status)
+        self.bus.publish(NOTIFY_MESSAGE, text=line, source_id=ctx.id, source_name=ctx.name, ts=ts)
+        log.info("[%s] Thông báo: %s", ctx.name, line)
+
+    def _flush_startup_burst(self, ctx: SourceContext) -> None:
+        """Gửi 1 tin nhắn duy nhất với mỗi dòng là 1 người cho đợt khởi động."""
+        if not ctx.startup_burst_queue:
+            return
+        lines = []
+        for item in ctx.startup_burst_queue:
+            t = item.get("track")
+            name = item.get("name")
+            if t is not None and t.identity and t.identity != UNKNOWN:
+                name = t.identity
+            line = self.format_notify_line(item["ts"], item["track_id"], name, "vào")
+            lines.append(line)
+            self.bus.publish(PERSON_ENTER, source_id=ctx.id, source_name=ctx.name,
+                             track_id=item["track_id"], name=name, ts=item["ts"],
+                             status="vào", startup_burst=True)
+        ctx.startup_burst_queue.clear()
+        if lines:
+            msg_content = "\n".join(lines)
+            if not (ctx.kind == SourceKind.FILE and not self._notify_video):
+                self.bus.publish(NOTIFY_MESSAGE, text=msg_content, source_id=ctx.id, source_name=ctx.name, ts=time.time())
+                log.info("[%s] Gửi thông báo khởi động (%d người):\n%s", ctx.name, len(lines), msg_content)
 
     # ================================================================== luồng AI
     def _ai_loop(self) -> None:
@@ -481,7 +627,7 @@ class SmartVisionPipeline:
         if match is not None and ft is not None:
             ctx.person_seen = True
             ctx.last_person_time = now
-            if self._need_face(ft, now):                             # nhận diện mặt chỉ cho mục tiêu (nếu chưa biết là ai)
+            if self._need_face_focus(ft, now):                       # nhận diện mặt chỉ cho mục tiêu (nếu chưa biết là ai)
                 ft.last_face_try = now
                 self._apply_face(ctx, ft, self.engine.process_faces(frame, ft.tlbr), frame)
             ctx.tracks_view = [self._to_view(ft, now, focused=True)]
@@ -530,12 +676,69 @@ class SmartVisionPipeline:
         if ctx.gate == ACTIVE and not focusing and not tracks and now - ctx.last_person_time > self.no_person_timeout:
             self._close_gate(ctx, now)
 
+        # --- Presence tracking: phát sự kiện ENTER / EXIT / OCCLUDED theo vòng đời track
+        if ctx.kind == SourceKind.FILE and not self._notify_video:
+            return
+
+        frame_shape = frame.shape
+
+        # 1. Quản lý người mới vào và startup burst
+        for t in tracks:
+            ctx.known_tracks[t.track_id] = t
+            if t.track_id in ctx.notified_enter:
+                continue
+            ctx.notified_enter.add(t.track_id)
+            name = t.identity if (t.identity and t.identity != UNKNOWN) else None
+
+            # Nếu đang trong cửa sổ startup burst
+            if not ctx.startup_burst_done:
+                if ctx.startup_burst_deadline == 0.0:
+                    ctx.startup_burst_deadline = now + self._startup_burst_window
+                if now <= ctx.startup_burst_deadline:
+                    ctx.startup_burst_queue.append({
+                        "track_id": t.track_id, "name": name, "ts": time.time(), "track": t
+                    })
+                    continue
+                else:
+                    ctx.startup_burst_done = True
+                    self._flush_startup_burst(ctx)
+
+            # Ngoài startup burst: thông báo 1 lần duy nhất cho người mới vào
+            self._notify_presence(ctx, t.track_id, name, "vào")
+
+        # Kiểm tra nếu đã quá deadline của startup burst thì flush
+        if not ctx.startup_burst_done and ctx.startup_burst_deadline > 0.0 and now > ctx.startup_burst_deadline:
+            ctx.startup_burst_done = True
+            self._flush_startup_burst(ctx)
+
+        # 2. Xử lý các track chính thức kết thúc (đã bị removed khỏi ByteTracker sau khi mất dấu)
+        removed_tracks = ctx.tracker.pop_removed_tracks()
+        for t in removed_tracks:
+            tid = t.track_id
+            if tid in ctx.notified_enter:
+                status = self._check_exit_or_occluded(t, frame_shape, ctx.tracker.frame_id)
+                name = t.identity if (t.identity and t.identity != UNKNOWN) else None
+                self._notify_presence(ctx, tid, name, status)
+                ctx.notified_enter.discard(tid)
+            ctx.known_tracks.pop(tid, None)
+
     # ------------------------------------------------------------------ nhận diện
     def _need_face(self, t: Track, now: float) -> bool:
         fc = self.face_cfg
         if t.identity not in (None, UNKNOWN):
             return False  # đã chốt là người quen
         gap = fc.get("interval_pending", 0.3) if t.identity is None else fc.get("interval_unknown", 1.5)
+        return now - t.last_face_try >= gap
+
+    def _need_face_focus(self, t: Track, now: float) -> bool:
+        """Như _need_face nhưng dùng tần suất thấp hơn khi đang ở chế độ focus (tiết kiệm tài nguyên)."""
+        if t.identity not in (None, UNKNOWN):
+            return False  # đã chốt là người quen
+        fc_focus = self.focus_cfg
+        if t.identity is None:
+            gap = float(fc_focus.get("face_interval_pending_focus", self.face_cfg.get("interval_pending", 0.3)))
+        else:
+            gap = float(fc_focus.get("face_interval_unknown_focus", self.face_cfg.get("interval_unknown", 1.5)))
         return now - t.last_face_try >= gap
 
     def _apply_face(self, ctx: SourceContext, t: Track, faces: list, frame: np.ndarray) -> None:

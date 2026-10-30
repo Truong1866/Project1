@@ -208,11 +208,16 @@ class SettingsPanel(QFrame):
         self.chk_motion = QCheckBox("Hiện vùng chuyển động (gỡ lỗi)")
         self.chk_motion.toggled.connect(lambda v: self.settingChanged.emit("show_motion", v))
 
+        self.chk_notify_video = QCheckBox("Gửi thông báo cho video file (mặc định tắt)")
+        self.chk_notify_video.setChecked(bool(d.get("notify_video", False)))
+        self.chk_notify_video.toggled.connect(lambda v: self.settingChanged.emit("notify_video", v))
+
         form.addRow("Vùng chuyển động tối thiểu", self.spin_area)
         form.addRow("AI chạy tối đa (lần/giây)", self.spin_fps)
         form.addRow("Ngưỡng nhận diện người", self.spin_conf)
         form.addRow("Ngưỡng khuôn mặt (cosine)", self.spin_face)
         form.addRow(self.chk_motion)
+        form.addRow(self.chk_notify_video)
         form.addRow(_note(
             "Vùng chuyển động nhỏ hơn mức tối thiểu bị bỏ qua. Tăng giá trị nếu cây, côn trùng vẫn làm AI chạy. "
             "Bật gỡ lỗi để xem khung vàng (hợp lệ) và khung xám (đã bị lọc)."))

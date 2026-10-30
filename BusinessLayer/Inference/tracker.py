@@ -109,6 +109,11 @@ class Track:
         self.face_box = None
         self.face_time = 0.0
         self.last_face_try = 0.0
+        # --- lưu thông tin lần cuối quan sát được để tính toán khi ra / bị che khuất
+        self.last_seen_tlbr = self._init_tlbr.copy()
+        self.last_seen_frame_id = 0
+        self.last_seen_vx = 0.0
+        self.last_seen_vy = 0.0
 
     @property
     def tlbr(self) -> np.ndarray:
@@ -119,6 +124,8 @@ class Track:
         self.state = TrackState.TRACKED
         self.is_activated = frame_id == 1
         self.frame_id = frame_id
+        self.last_seen_frame_id = frame_id
+        self.last_seen_tlbr = self._init_tlbr.copy()
 
     def predict(self, kf: KalmanFilterXYAH) -> None:
         mean = self.mean.copy()
@@ -133,6 +140,11 @@ class Track:
         self.frame_id = frame_id
         self.score = float(score)
         self.hits += 1
+        self.last_seen_frame_id = frame_id
+        self.last_seen_tlbr = np.asarray(tlbr, dtype=np.float64)
+        if self.mean is not None:
+            self.last_seen_vx = float(self.mean[4])
+            self.last_seen_vy = float(self.mean[5])
 
 
 # ---------------------------------------------------------------------- Tracker
@@ -152,6 +164,13 @@ class ByteTracker:
         self._next_id = 1
         self.tracked: list[Track] = []
         self.lost: list[Track] = []
+        self.removed_tracks: list[Track] = []
+
+    def pop_removed_tracks(self) -> list[Track]:
+        """Lấy danh sách các track vừa bị xoá khỏi bộ theo dõi (quá hạn lost hoặc removed)."""
+        rem = self.removed_tracks
+        self.removed_tracks = []
+        return rem
 
     def update(self, dets: np.ndarray) -> list[Track]:
         """dets: (N,5) [x1,y1,x2,y2,score]. Trả về các track chính thức khớp được trong khung này."""
@@ -217,6 +236,7 @@ class ByteTracker:
                 removed.append(t)
 
         removed_ids = {t.track_id for t in removed}
+        self.removed_tracks = list(removed)
         tracked_now = [t for t in self.tracked if t.state == TrackState.TRACKED]
         seen = {t.track_id for t in tracked_now}
         for t in activated + refound:

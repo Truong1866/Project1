@@ -28,7 +28,7 @@ import openvino as ov  # noqa: E402,F401  (nạp OpenVINO TRƯỚC cv2 / onnxrun
 import cv2  # noqa: E402
 import numpy as np  # noqa: E402
 
-from BusinessLayer.Inference.yolo_native import YOLOv8OpenVINO, box_label  # noqa: E402
+from BusinessLayer.Inference.yolo_native import YOLOOpenVINO as YOLOv8OpenVINO, box_label  # noqa: E402
 
 MODELS_DIR = ROOT / "Models"
 YOLO_PATH = MODELS_DIR / "yolov8n_openvino_model"   # thư mục chứa .xml/.bin

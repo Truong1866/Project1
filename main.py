@@ -45,8 +45,6 @@ def main() -> int:
     if notifier:
         notifier.stop()
     return code
-    # nạp mô hình ở luồng ngầm, giao diện hiện ngay không bị đơ
-    return code
 
 
 if __name__ == "__main__":
