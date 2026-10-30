@@ -52,34 +52,21 @@ YOLO_MODELS: list[ModelConfig] = [
         export_prefix='yolov26n',
         quantize='FP16',
     ),
-    ModelConfig(
-        target_filename='yolov8s.pt',
-        candidates=['yolov8s.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov8s',
-        quantize='FP16',
-    ),
-    ModelConfig(
-        target_filename='yolov26s.pt',
-        candidates=['yolo26s.pt', 'yolov26s.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov26s',
-        quantize='FP16',
-    ),
-    ModelConfig(
-        target_filename='yolov8m.pt',
-        candidates=['yolov8m.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov8m',
-        quantize='FP16',
-    ),
-    ModelConfig(
-        target_filename='yolov8l.pt',
-        candidates=['yolov8l.pt'],
-        export_sizes=[640, 320],
-        export_prefix='yolov8l',
-        quantize='FP16',
-    ),
+    # ── Thêm model mới vào đây ──────────────────────────────────────────────
+    # ModelConfig(
+    #     target_filename='yolov9c.pt',
+    #     candidates=['yolov9c.pt'],
+    #     export_sizes=[640],
+    #     export_prefix='yolov9c',
+    #     quantize='FP16',
+    # ),
+    # ModelConfig(
+    #     target_filename='yolo11n.pt',
+    #     candidates=['yolo11n.pt'],
+    #     export_sizes=[640, 320],
+    #     export_prefix='yolo11n',
+    #     quantize='INT8',
+    # ),
 ]
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -252,16 +239,8 @@ def setup_face_models():
     except Exception as e:
         print(f"=> [Thất bại] Lỗi khi tải mô hình khuôn mặt: {e}")
 
-    try:
-        # buffalo_s là bộ model nhẹ (Small) rất phù hợp cho CPU/iGPU
-        # Bao gồm cả Detection (tìm mặt) và Recognition (trích xuất vector)
-        app = FaceAnalysis(name="buffalo_m", root=face_dir)
-        app.prepare(ctx_id=0, det_size=(640, 640))
-        print("=> [Thành công] Mô hình khuôn mặt (ONNX) đã tải xong và sẵn sàng dùng!")
-    except Exception as e:
-        print(f"=> [Thất bại] Lỗi khi tải mô hình khuôn mặt: {e}")
 
 if __name__ == '__main__':
-    #setup_yolo()
-    setup_face_models()
+    setup_yolo()
+    # setup_face_models()
 
